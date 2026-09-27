@@ -1,0 +1,14 @@
+{
+  "name": "sls-v3-desktop",
+  "private": true,
+  "version": "3.0.0",
+  "type": "module",
+  "scripts": {
+    "build:web": "npm --prefix webview run build",
+    "tauri:dev": "npm run build:web && tauri dev",
+    "build:exe": "npm run build:web && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0"
+  }
+}

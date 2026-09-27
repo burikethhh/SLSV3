@@ -1,0 +1,11 @@
+[project]
+id = "cjxpsiuvwihanxqccpnf"
+name = "sls-v3"
+
+# sync auth = license token (GPOS-…), not a Supabase JWT — platform must not reject it.
+[functions.sync]
+verify_jwt = false
+
+# updates-check is a public GET (desktop has no Supabase session) — rate-limited in-fn.
+[functions.updates-check]
+verify_jwt = false

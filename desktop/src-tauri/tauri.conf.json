@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SLS v3",
+  "mainBinaryName": "GymPOS",
+  "version": "3.0.0",
+  "identifier": "com.sls.v3",
+  "build": {
+    "frontendDist": "../webview/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "title": "SLS v3 — Gate", "width": 1280, "height": 800 }]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "nsis",
+    "resources": {
+      "../models/": "resources/models/",
+      "redist/": ""
+    }
+  }
+}

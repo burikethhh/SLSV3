@@ -1,0 +1,13 @@
+---
+description: Rules for working on the SoloLeveling project (Git repo + Node + Rust)
+globs: "SoloLeveling/**"
+alwaysApply: false
+---
+
+# SoloLeveling
+
+- Path: `B:\Projects\SoloLeveling` — type: Git repo + Node + Rust
+- From the workspace root: `npm run dev -- SoloLeveling` (also `build`, `test`, `lint`, `install`)
+- Workspace member: no
+- Never commit `.env`, secrets or `node_modules`.
+- Verify with the project's lint/build/test before finishing.

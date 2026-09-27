@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SLS v3</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0b0e14; color: #e6e9f0; }
+    nav { display: flex; gap: 8px; padding: 12px; background: #12161f; flex-wrap: wrap; }
+    nav button { background: #1d2534; color: #fff; border: 0; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+    nav button:hover { background: #2a3548; }
+    main { padding: 16px; }
+    .hint { color: #9aa4b2; font-size: 13px; }
+    .muted { color: #9aa4b2; }
+    #exposure { font-weight: 600; }
+    input, textarea, select, button { font: inherit; background: #1d2534; color: #fff; border: 1px solid #2a3548; border-radius: 6px; padding: 6px 10px; }
+    button, .primary { cursor: pointer; }
+    button.primary { background: #3b82f6; border-color: #3b82f6; }
+    button.primary:hover { background: #2563eb; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #1d2534; }
+    th { color: #9aa4b2; font-weight: 600; font-size: 12px; text-transform: uppercase; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #9aa4b2; }
+  </style>
+</head>
+<body>
+  <nav>
+    <button data-view="gate">Gate IN</button>
+    <button data-view="pos">POS</button>
+    <button data-view="members">Members</button>
+    <button data-view="dash">Dashboard</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+  <main>
+    <section id="view-gate">
+      <h2>Gate — single camera scan-in</h2>
+      <video id="cam" autoplay playsinline width="640"></video>
+      <p>Exposure: <span id="exposure">—</span> <span class="hint">(auto-brightness corrects TooDark/TooBright, rejects Unusable)</span></p>
+      <p class="hint">Door: <span id="door">checking…</span></p>
+      <div id="match"></div>
+    </section>
+    <section id="view-pos" hidden>
+      <h2>POS (cents math, virtualized, debounced)</h2>
+      <input id="pos-search" placeholder="Search products…" autocomplete="off" />
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-top:12px">
+        <div id="pos-grid"></div>
+        <div id="pos-cart" class="hint"></div>
+      </div>
+    </section>
+    <section id="view-members" hidden></section>
+    <section id="view-dash" hidden></section>
+    <section id="view-settings" hidden></section>
+  </main>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
