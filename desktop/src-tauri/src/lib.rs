@@ -106,10 +106,11 @@ fn sale_list(limit: Option<u32>) -> Result<Vec<db::SaleRow>, String> {
     db::sale_list(limit.unwrap_or(50)).map_err(|e| e.to_string())
 }
 
-/// Outbox depth for the status bar ("3 pending sync").
+/// Outbox depth for the status bar ("3 pending sync") — COUNT only, never
+/// pulls payloads (face vectors are huge, status polls often).
 #[tauri::command]
 fn sync_pending() -> Result<u32, String> {
-    Ok(db::take_outbox(1000).map(|b| b.len() as u32).unwrap_or(0))
+    Ok(db::outbox_count().unwrap_or(0))
 }
 
 // ── Face enroll/match (camera pipeline feeds embeddings; store is always on) ──
@@ -477,6 +478,8 @@ pub fn run() {
             db::init_data_dir(dir);
             // Warm FaceStore from SQLite before the first frame.
             let _ = face_store();
+            // Kiosk retention (90d local, cloud is truth) — never blocks boot.
+            let _ = db::prune_old_logs(90);
             // Restore cached license (offline-safe) + resume sync when enabled.
             boot_license();
             spawn_hw_supervisor();

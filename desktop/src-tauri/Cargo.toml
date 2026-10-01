@@ -1,6 +1,6 @@
 [package]
 name = "sls-desktop"
-version = "3.0.2"
+version = "3.0.3"
 edition = "2021"
 
 # Slim Tauri v2 shell. Excluded from default workspace build (needs system webview + ort native lib).

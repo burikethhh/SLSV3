@@ -138,7 +138,9 @@ document.getElementById("side-toggle")?.addEventListener("click", () => {
   try { localStorage.setItem("sls.rail", rail ? "1" : "0"); } catch { /* ignore */ }
 });
 
-// ── Kiosk Keyboard Shortcuts (F1-F5 views, Spacebar gate unlock, Esc close) ──
+// ── Kiosk Keyboard Shortcuts (F1-F5 views, Esc close) ──
+// NOTE: no Spacebar unlock — a stray keypress must never pulse the maglock.
+// Staff opens the gate via the header button or Gate view manual admit.
 window.addEventListener("keydown", (e) => {
   const target = e.target;
   const isInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
@@ -156,8 +158,4 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "F3") { e.preventDefault(); document.querySelector('.nav-item[data-view="members"]')?.click(); }
   else if (e.key === "F4") { e.preventDefault(); document.querySelector('.nav-item[data-view="dash"]')?.click(); }
   else if (e.key === "F5") { e.preventDefault(); document.querySelector('.nav-item[data-view="settings"]')?.click(); }
-  else if (e.code === "Space") {
-    e.preventDefault();
-    document.getElementById("hdr-unlock")?.click();
-  }
 });

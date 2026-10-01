@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SLS v3",
   "mainBinaryName": "GymPOS",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "identifier": "com.sls.v3",
   "build": {
     "frontendDist": "../webview/dist"
@@ -14,7 +14,7 @@
   "bundle": {
     "active": true,
     "targets": "nsis",
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "resources": {
       "../models/": "resources/models/",
       "redist/": ""

@@ -143,14 +143,9 @@ function playChime(type) {
 
 // ── Live Attendance Telemetry Stream ──────────────────────────────────────────
 // ── Hunter Attendance Progression & Member Stats ──────────────────────────────
-const memberStats = {
-  "m-01": { visitsToday: 1, totalVisits: 104, name: "Sung Jinwoo" },
-  "m-02": { visitsToday: 2, totalVisits: 72, name: "Cha Hae-In" },
-  "m-03": { visitsToday: 1, totalVisits: 38, name: "Choi Jong-In" },
-  "m-04": { visitsToday: 1, totalVisits: 19, name: "Baek Yoonho" },
-  "m-05": { visitsToday: 1, totalVisits: 8, name: "Yoo Jinho" },
-  "m-06": { visitsToday: 1, totalVisits: 3, name: "Kang Taeshik" },
-};
+// Runtime cache only — filled from attendance_list(). No seed names in prod:
+// an empty gym shows the empty state, not fake hunters.
+const memberStats = {};
 
 function calculateHunterRank(totalVisits) {
   const count = totalVisits || 1;
@@ -210,17 +205,10 @@ async function loadAttendanceStream() {
     }
   }
 
-  // Fallback simulator items if no database records exist yet (diversified realistic ranks)
+  // Empty gym = empty state (renderAttendanceStream shows "no check-ins yet").
+  // Never seed fake hunters into a production bundle.
   if (streamItems.length === 0) {
-    streamItems = [
-      { id: "m-01", name: "Sung Jinwoo", confidence: 0.994, time: "Just now", visitsToday: 1, totalVisits: 104, rank: "S" },
-      { id: "m-02", name: "Cha Hae-In", confidence: 0.987, time: "3m ago", visitsToday: 2, totalVisits: 72, rank: "A" },
-      { id: "m-03", name: "Choi Jong-In", confidence: 0.952, time: "8m ago", visitsToday: 1, totalVisits: 38, rank: "B" },
-      { id: "m-04", name: "Baek Yoonho", confidence: 0.941, time: "14m ago", visitsToday: 1, totalVisits: 19, rank: "C" },
-      { id: "m-05", name: "Yoo Jinho", confidence: 0.915, time: "22m ago", visitsToday: 1, totalVisits: 8, rank: "D" },
-      { id: "m-06", name: "Kang Taeshik", confidence: 0.884, time: "35m ago", visitsToday: 1, totalVisits: 3, rank: "E" },
-    ];
-    todayCount = streamItems.length;
+    todayCount = 0;
   }
 
   renderAttendanceStream();
@@ -578,8 +566,7 @@ function showHint(text, color) {
   if (!el) return;
   el.textContent = text;
   el.style.color = color || "#e6e9f0";
-  // Admitted verdict goes big — the kiosk moment.
-  el.style.fontSize = color === "#3ddc97" ? "2.2rem" : "";
+  // Keep the verdict size stable — a jumping layout on admit looks broken.
 
   const card = document.querySelector(".cam-card");
   const retStatus = document.getElementById("reticle-status");

@@ -308,6 +308,30 @@ pub fn drop_outbox_dead(max_attempts: u32) -> rusqlite::Result<u32> {
     Ok(n)
 }
 
+/// Cheap COUNT for the status bar — sync_pending must not pull full payloads
+/// (member rows carry 512-float face vectors) just to show "3 pending sync".
+pub fn outbox_count() -> rusqlite::Result<u32> {
+    let db = conn().lock().unwrap();
+    let n: i64 = db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0))?;
+    Ok(n as u32)
+}
+
+/// Kiosk retention: keep 90 days of local logs, cloud is source of truth.
+/// Runs at boot; failures are ignored by the caller so the gate never blocks.
+pub fn prune_old_logs(keep_days: u32) -> rusqlite::Result<u32> {
+    let db = conn().lock().unwrap();
+    let days = format!("-{} days", keep_days.max(7));
+    let a = db.execute(
+        "DELETE FROM attendance_logs WHERE created_at < datetime('now', ?1)",
+        params![days],
+    )? as u32;
+    let _ = db.execute(
+        "DELETE FROM sales WHERE created_at < datetime('now', ?1)",
+        params![days],
+    );
+    Ok(a)
+}
+
 // ── Staff cache (terminal-PIN lock for Settings; pulled via sync) ─────────────
 
 /// Upsert a staff row pulled from Supabase (`staff` table, PHC pin_hash —
