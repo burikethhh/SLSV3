@@ -1,0 +1,13 @@
+{
+  "name": "SLS v3 — Gym Command Center",
+  "short_name": "SLS v3",
+  "description": "Solo Leveling gym management: face gate, offline POS, licensing, dashboards.",
+  "start_url": "/#/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#07090e",
+  "theme_color": "#07090e",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

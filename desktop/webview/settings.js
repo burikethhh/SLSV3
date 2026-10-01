@@ -12,7 +12,8 @@ export async function initSettings() {
   if (!root) return;
   if (!root.dataset.bound) {
     root.dataset.bound = "1";
-    const locked = invoke ? await invoke("settings_lock_state").catch(() => false) : false;
+    // In preview mode default to locked once so touch keypad is visible and interactive
+    const locked = invoke ? await invoke("settings_lock_state").catch(() => false) : true;
     if (locked && !unlocked) {
       renderLock(root);
       await showStatus(root);
@@ -30,25 +31,70 @@ export async function initSettings() {
 function renderLock(root) {
   root.dataset.mode = "lock";
   root.innerHTML = `
-    <h2>Settings — locked</h2>
-    <div class="row" style="display:flex;flex-direction:column;gap:8px;max-width:420px">
-      <p class="hint">Enter a staff PIN to change license or cloud settings.</p>
-      <label>Username <input id="lock-user" autocomplete="off" style="width:100%" /></label>
-      <label>PIN <input id="lock-pin" type="password" inputmode="numeric" maxlength="6" style="width:100%" /></label>
-      <div class="row" style="display:flex;gap:8px">
-        <button id="lock-go" class="primary">Unlock</button>
+    <h2>Settings — Terminal Security</h2>
+    <div class="pin-lock-container glass">
+      <div class="pin-head">
+        <div class="pin-emblem">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--brand);filter:drop-shadow(0 0 6px var(--brand));"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+        </div>
+        <div>
+          <div class="pin-title">STAFF AUTHENTICATION</div>
+          <p class="hint" style="margin:2px 0 0">Enter staff PIN to access terminal &amp; gateway settings.</p>
+        </div>
       </div>
-      <p id="lock-msg" class="hint"></p>
-      <div id="set-status" class="hint"></div>
+      <label>Staff Username <input id="lock-user" value="admin" autocomplete="off" style="width:100%" /></label>
+      <label>PIN Code
+        <div class="pin-display-wrap">
+          <input id="lock-pin" class="pin-display" type="password" inputmode="numeric" maxlength="6" placeholder="••••" style="width:100%" />
+        </div>
+      </label>
+      <div class="pin-grid">
+        <button type="button" class="pin-key" data-val="1">1</button>
+        <button type="button" class="pin-key" data-val="2">2</button>
+        <button type="button" class="pin-key" data-val="3">3</button>
+        <button type="button" class="pin-key" data-val="4">4</button>
+        <button type="button" class="pin-key" data-val="5">5</button>
+        <button type="button" class="pin-key" data-val="6">6</button>
+        <button type="button" class="pin-key" data-val="7">7</button>
+        <button type="button" class="pin-key" data-val="8">8</button>
+        <button type="button" class="pin-key" data-val="9">9</button>
+        <button type="button" class="pin-key pin-clear" data-val="clear">CLR</button>
+        <button type="button" class="pin-key" data-val="0">0</button>
+        <button type="button" class="pin-key pin-back" data-val="back" aria-label="Backspace">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="pointer-events:none"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path><line x1="18" y1="9" x2="12" y2="15"></line><line x1="12" y1="9" x2="18" y2="15"></line></svg>
+        </button>
+      </div>
+      <div class="row" style="display:flex;gap:8px;margin-top:6px">
+        <button id="lock-go" class="primary" style="width:100%;height:44px;font-size:15px">Unlock Settings</button>
+      </div>
+      <p id="lock-msg" class="hint" style="text-align:center;min-height:1.2em"></p>
+      <div id="set-status" class="hint" style="margin-top:4px"></div>
     </div>`;
+
+  const pinInput = document.getElementById("lock-pin");
+  root.querySelectorAll(".pin-key").forEach((k) => {
+    k.addEventListener("click", () => {
+      const v = k.dataset.val;
+      if (v === "clear") {
+        pinInput.value = "";
+      } else if (v === "back") {
+        pinInput.value = pinInput.value.slice(0, -1);
+      } else if (pinInput.value.length < 6) {
+        pinInput.value += v;
+      }
+      pinInput.dispatchEvent(new Event("input"));
+    });
+  });
 
   const go = async () => {
     const msg = document.getElementById("lock-msg");
     const username = document.getElementById("lock-user").value.trim();
     const pin = document.getElementById("lock-pin").value.trim();
-    if (!username || !pin) { msg.textContent = "Username and PIN required."; return; }
+    if (!username || !pin) { msg.textContent = "Username and PIN required."; msg.style.color = "#fbbf24"; return; }
     try {
-      await invoke("staff_verify", { username, pin });
+      if (invoke) {
+        await invoke("staff_verify", { username, pin });
+      }
       unlocked = true;
       delete root.dataset.mode;
       root.dataset.bound = "1";
@@ -67,23 +113,36 @@ function renderLock(root) {
 function renderSettings(root) {
   root.dataset.mode = "settings";
   root.innerHTML = `
-    <h2>Settings — license &amp; cloud</h2>
-    <div class="row" style="display:flex;flex-direction:column;gap:8px;max-width:640px">
-      <label>Supabase URL <input id="set-url" placeholder="${DEFAULT_URL}" style="width:100%" /></label>
-      <label>License key (GPOS-…) <textarea id="set-token" rows="4" style="width:100%" placeholder="GPOS-…"></textarea></label>
-      <div class="row" style="display:flex;gap:8px">
-        <button id="set-apply" class="primary">Apply license</button>
-        <button id="set-save-url">Save URL only</button>
+    <h2>Settings — License &amp; Cloud Gateway</h2>
+    <div style="display:flex;flex-direction:column;gap:14px;max-width:680px;margin-top:12px">
+      <div class="glass panel">
+        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">CLOUD CONNECTION</h3>
+        <label>Supabase Gateway URL <input id="set-url" placeholder="${DEFAULT_URL}" style="width:100%" /></label>
+        <div style="margin-top:10px">
+          <button id="set-save-url">Save URL Only</button>
+        </div>
       </div>
-      <p id="set-msg" class="hint"></p>
-      <div id="set-status" class="hint"></div>
-      <hr style="border-color:#2a2f3a" />
-      <div class="row" style="display:flex;gap:8px;align-items:center">
-        <button id="set-update">Check for updates</button>
-        <button id="set-hw">Reconnect controller</button>
-        <span id="set-extra" class="hint"></span>
+
+      <div class="glass panel">
+        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">LICENSE &amp; HUNTER GUILD RANK</h3>
+        <label>Terminal License Key (GPOS-…) <textarea id="set-token" rows="3" style="width:100%;font-family:monospace" placeholder="GPOS-…"></textarea></label>
+        <div style="margin-top:10px">
+          <button id="set-apply" class="primary">Apply &amp; Verify License</button>
+        </div>
+        <p id="set-msg" class="hint" style="margin-top:8px"></p>
+        <div id="set-status" class="hint" style="margin-top:8px"></div>
       </div>
-      <div id="set-update-result" class="hint"></div>
+
+      <div class="glass panel">
+        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">TERMINAL HARDWARE &amp; RELEASES</h3>
+        <div class="row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button id="set-update">Check For Updates</button>
+          <button id="set-hw">Reconnect ESP32 Controller</button>
+          <span id="set-extra" class="hint"></span>
+        </div>
+        <div id="set-update-result" class="hint" style="margin-top:8px"></div>
+        <div id="set-restart" style="margin-top:8px"></div>
+      </div>
     </div>`;
 
   bindActions();
@@ -132,7 +191,19 @@ async function bindActions() {
       if (r?.update) {
         out.innerHTML = `Update available: <strong>v${escapeHtml(String(r.version))}</strong> — ` +
           `<a href="${escapeHtml(String(r.url))}" target="_blank" rel="noopener" style="color:#4cc9f0">download installer</a>` +
-          (r.notes ? `<br/>${escapeHtml(String(r.notes))}` : "");
+          (r.notes ? `<br/>${escapeHtml(String(r.notes))}` : "") +
+          `<br/><button id="set-install" class="primary" style="margin-top:8px">Download &amp; install now</button>`;
+        document.getElementById("set-install").onclick = async () => {
+          out.textContent = "Downloading & installing in the background — the terminal stays usable…";
+          try {
+            const v = await invoke("update_install");
+            out.textContent = v === "already latest" ? "Already on the latest version." : `Installed v${v}.`;
+            await renderRestartBanner();
+          } catch (e) {
+            out.textContent = String(e);
+            out.style.color = "#ff6b6b";
+          }
+        };
       } else {
         out.textContent = r?.version ? `You're on the latest version (v${r.version}).` : "No releases published yet.";
       }
@@ -157,11 +228,17 @@ async function bindActions() {
 
 async function showStatus(root) {
   const el = root.querySelector("#set-status");
-  if (!el || !invoke) return;
+  if (!el) return;
   await fillStatus(el);
 }
 
 async function fillStatus(el) {
+  if (!invoke) {
+    el.innerHTML =
+      `License: <strong style="color:#fbbf24">S · Ultra (Active)</strong> · Solo Leveling System HQ<br/>` +
+      `Pending sync: 0 · Controller: Connected`;
+    return;
+  }
   try {
     const status = await invoke("license_status");
     const pending = await invoke("sync_pending");
@@ -183,6 +260,17 @@ async function fillStatus(el) {
 async function refresh() {
   const el = document.getElementById("set-status");
   if (el) await fillStatus(el);
+  await renderRestartBanner();
+}
+
+/** Restart banner once an update (boot auto-install or manual) is staged. */
+async function renderRestartBanner() {
+  const host = document.getElementById("set-restart");
+  if (!host) return; // lock screen has no banner slot
+  const v = invoke ? await invoke("settings_get", { key: "pending_restart" }).catch(() => null) : null;
+  if (!v) { host.innerHTML = ""; return; }
+  host.innerHTML = `<div class="update-banner">Installed <strong>v${escapeHtml(String(v))}</strong>&nbsp;— restart the terminal to apply.&nbsp;<button id="set-restart-go" class="primary">Restart now</button></div>`;
+  document.getElementById("set-restart-go").onclick = () => invoke("restart_app");
 }
 
 function escapeHtml(s) {

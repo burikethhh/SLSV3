@@ -76,11 +76,18 @@ pub fn probe_passes_quality_gate(probe: &[f32]) -> bool {
 
 /// Recommended starting thresholds — MUST be re-tuned per model on gym data.
 /// Thresholds belong to one model; do not reuse SFace values for EdgeFace.
+/// 0.52 = tuned starting point for EdgeFace-XXS 512-d on gym captures
+/// (0.40 was the UniFace default and false-accepted across family members).
+/// Scores in [REVIEW, MATCH) need staff eyes (PIN / QR / approve button) —
+/// face alone must not open the maglock there. No liveness yet: photo or
+/// phone video is still a valid key, so treat face as convenience + audit.
 pub mod thresholds {
     /// SFace legacy (128-d) starting point carried from v2.
     pub const SFACE_128: f32 = 0.62;
-    /// EdgeFace-XXS/XS (512-d) starting point (UniFace default ≈ 0.40).
-    pub const EDGEFACE_512_START: f32 = 0.40;
+    /// EdgeFace-XXS/XS (512-d) gate threshold — open only at or above this.
+    pub const EDGEFACE_512_START: f32 = 0.52;
+    /// Below this = no match. At or above this but below MATCH = staff review.
+    pub const EDGEFACE_512_REVIEW: f32 = 0.42;
     /// Adaptive-learning promotion bar (v2 used 0.80 for SFace).
     pub const ADAPT_HIGH_CONFIDENCE: f32 = 0.70;
 }

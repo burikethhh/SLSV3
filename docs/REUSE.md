@@ -56,7 +56,7 @@ Each entry: what was kept verbatim-adapted, what was slimmed/dropped, and why.
 
 ## Dashboard deploy — Vercel (2026-09-25)
 Project `sls-v3-web` under `christiankethaguacito-codes-projects` · CLI logged in.
-- **Production:** https://sls-v3-web.vercel.app (alias)
+- **Production:** https://sls.keth.website (SLS v3 dashboard; root `keth.website` reserved for portfolio)
 - **Inspect:** https://vercel.com/christiankethaguacito-codes-projects/sls-v3-web
 - Config: `web/vercel.json` (vite build → `dist`, SPA rewrite, immutable `/assets` cache)
 - Env (Config type, production + preview): `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (anon is public by design)
@@ -133,3 +133,54 @@ node scripts\e2e\e2e-license.mjs   # 26 checks
 node scripts\e2e\e2e-fixes.mjs      # 15 checks (needs the env key)
 node scripts\e2e\e2e-desktop.mjs    # 14 checks (runs cargo test too)
 ```
+
+## Auto-update pipeline (2026-09-28, v3.0.1+)
+Terminals self-update: boot task (30s delay, never blocks boot) checks
+`updates-check?format=tauri`, downloads + installs via tauri-plugin-updater
+(passive NSIS, no interaction), records `pending_restart` in SQLite; gate +
+settings views show a restart banner → `restart_app`. Manual path: Settings →
+Check → Download & install → Restart. Offline failures only log.
+- **Signing key:** `%USERPROFILE%\.tauri\sls-update.key` (+`.pub`), generated via
+  `npx tauri signer generate -w <path> --ci` (passwordless). **NEVER lose it,
+  NEVER commit it** — rotation orphans installed terminals (old pubkey baked
+  into their `tauri.conf.json` can't verify new signatures; fleet-wide manual
+  reinstall). Pubkey lives in `desktop/src-tauri/tauri.conf.json` → `plugins.updater`.
+- **Release build (signing happens automatically):**
+  ```powershell
+  $env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.tauri\sls-update.key"
+  cd B:\Projects\SoloLeveling\desktop; npm run build:exe   # + .sig next to the setup exe
+  ```
+- **Publish:** upload `SLS v3_<ver>_x64-setup.exe` to the public `releases`
+  Storage bucket (service_role), then insert/update the `releases` row
+  (version/channel/rollout_pct/download_url/notes/**sig** = `.sig` content).
+  `updates-check` serves the Tauri manifest (`?format=tauri`) or 204; the app
+  shape is unchanged for the Settings button.
+- **Footguns:** `tokio::spawn` in Tauri `setup` panics (exit 101, no runtime yet)
+  — always `tauri::async_runtime::spawn`. After ANY rebuild, re-upload the exe
+  AND update the row's `sig` (signatures are per-binary). `rate_limit_email_sent`
+  can only be raised once custom SMTP exists (API 400s otherwise).
+- **Harness passwords:** all three `scripts/e2e/*.mjs` share `E2ePassw0rd!xyz`
+  and the pinned `ceo.e2e.1790267997223` / `owner.e2e.1790507038514` accounts
+  (e2e-desktop resets the CEO pw each run — keep them in sync).
+
+## Domain `keth.website` — Vercel DNS (2026-09-28)
+Bought via Vercel (registrar+NS = Vercel, `ns1/ns2.vercel-dns.com`, expires 2027-09-28).
+The zone lives in **Domains → dashboard**, records also via `vercel dns add`. Bound to
+project `sls-v3-web`: apex + `sls.` + `www.` — all three verified `configured_correctly`:
+```powershell
+$vc = "$env:APPDATA\npm\vercel.cmd"
+Set-Location B:\Projects\SoloLeveling\web
+& $vc domains add keth.website sls-v3-web        # apex (Vercel auto-creates A records)
+& $vc domains add sls.keth.website sls-v3-web    # canonical app URL
+& $vc domains add www.keth.website sls-v3-web
+# future projects: & $vc domains add <sub>.keth.website <project-name>
+```
+- Supabase auth now: `site_url=https://sls.keth.website` (+ old vercel alias & `http://localhost:5173/*` allowed).
+- **`uri_allow_list` API quirk:** the management API strips space/newline separators (and won't
+  accept an array), so only a **single** pattern survives intact — currently `http://localhost:5173/*`.
+  Everything else falls back to `site_url` (evil URLs too — safe, they never leak). Multi-entry
+  lists must be set via the dashboard if ever needed.
+- **`rate_limit_email_sent` is stuck at 2 until custom SMTP exists** (PATCH → 400
+  "Custom SMTP required…"); once SMTP is configured, raise it (e.g. 60). Without SMTP, public
+  sign-ups 429 when the window is spent — CEO-created accounts unaffected.
+

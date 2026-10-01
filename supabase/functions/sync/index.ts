@@ -13,8 +13,8 @@
 // - Caps: each array ≤ 500, body ≤ 512 KiB, per-IP 300/min.
 // - product_ids = full id list (≤5000) so the terminal can DELETE local
 //   products the owner removed; products = first 500 with detail for upsert.
-// - Kill-switch FAIL-CLOSED: missing gym/license row OR disabled/revoked
-//   → remote_disabled=true (never trust a row we can't find).
+// - Kill-switch FAIL-CLOSED: missing gym/license row, disabled/revoked, or
+//   past the 3-day expiry grace → remote_disabled=true
 import { serve } from "../_shared/cors.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0";
 import { importPublicKey, PSS, b64url } from "../_shared/licenseCrypto.ts";
@@ -25,6 +25,13 @@ const BODY_CAP = 512 * 1024;
 const PRODUCT_IDS_CAP = 5000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const asUuid = (v: unknown): string | null => (typeof v === "string" && UUID_RE.test(v) ? v : null);
+
+// Fix 2+3: allowlisted tender types — typos used to split revenue reports.
+const PAY_METHODS = new Set(["cash", "gcash", "maya", "card", "qrph", "bank"]);
+const asPayMethod = (v: unknown): string => {
+  const m = String(v ?? "cash").trim().toLowerCase();
+  return PAY_METHODS.has(m) ? m : "cash";
+};
 
 function parseLicense(token: string): { ok: true; msg: Uint8Array; sig: Uint8Array } | { ok: false } {
   const clean = String(token ?? "").replace(/\s+/g, "");
@@ -79,11 +86,17 @@ serve(async (req) => {
 
   // Kill-switch check FIRST: missing row / disabled gym / revoked license all
   // stop the push path (fail-closed — a row we can't find is a dead license).
+  // Expiry uses the same 3-day grace as the desktop evaluator
+  // (sls-core LicenseClaims::evaluate) and fleet_mrr, so a terminal in its
+  // grace window can still push while the dashboard shows it as grace.
   const [{ data: gym }, { data: lic }] = await Promise.all([
     supa.from("gyms").select("disabled").eq("id", gymId).maybeSingle(),
-    supa.from("licenses").select("revoked").eq("id", licenseId).maybeSingle(),
+    supa.from("licenses").select("revoked,expires_at").eq("id", licenseId).maybeSingle(),
   ]);
-  if (!gym || !lic || gym.disabled || lic.revoked) {
+  const graceMs = 3 * 86400_000;
+  const expMs = lic?.expires_at ? Date.parse(lic.expires_at as string) : NaN;
+  const pastGrace = Number.isFinite(expMs) ? Date.now() > expMs + graceMs : true;
+  if (!gym || !lic || gym.disabled || lic.revoked || pastGrace) {
     return Response.json({ remote_disabled: true, products: [], product_ids: [], server_time: Date.now() });
   }
 
@@ -154,14 +167,35 @@ serve(async (req) => {
       skipped++;
       continue;
     }
+    // Fix 2: recompute the total from line items — a stolen license token
+    // could previously push any peso figure and the dashboard reported it.
+    // Unknown/negative lines are dropped; a >1-peso mismatch is rejected.
+    const lines = Array.isArray(items) ? items : [];
+    const cleanLines: { product_id: string | null; qty: number; unit_cents: number }[] = [];
+    for (const it of lines) {
+      const r = (it ?? {}) as Record<string, unknown>;
+      const qty = Math.floor(Number(r.qty ?? 0));
+      const unit = Math.floor(Number(r.unit_cents ?? 0));
+      if (!Number.isFinite(qty) || !Number.isFinite(unit) || qty <= 0 || unit < 0) continue;
+      if (qty > 999 || unit > 100_000_00) continue; // sanity caps per line
+      cleanLines.push({ product_id: asUuid(r.product_id), qty, unit_cents: unit });
+    }
+    if (!cleanLines.length) { skipped++; continue; }
+    const computed = cleanLines.reduce((a, l) => a + l.qty * l.unit_cents, 0);
+    const claimed = Math.floor(Number(s.total_cents ?? NaN));
+    // Tolerate sub-peso rounding from old terminals, reject anything bigger.
+    if (!Number.isFinite(claimed) || claimed < 0 || Math.abs(claimed - computed) > 100) {
+      skipped++;
+      continue;
+    }
     writes.push(
       supa.from("sales").upsert(
         {
           id,
           gym_id: gymId,
-          items: Array.isArray(items) ? items : [],
-          total_cents: Number(s.total_cents ?? 0),
-          pay_method: String(s.pay_method ?? "cash"),
+          items: cleanLines,
+          total_cents: computed,
+          pay_method: asPayMethod(s.pay_method),
           created_at: typeof s.created_at === "string" && s.created_at ? s.created_at : new Date().toISOString(),
         },
         { onConflict: "id" },
@@ -181,7 +215,7 @@ serve(async (req) => {
   const [products, productIds, staff] = await Promise.all([
     supa.from("products").select("id,name,price_cents,stock").eq("gym_id", gymId).limit(500),
     supa.from("products").select("id").eq("gym_id", gymId).limit(PRODUCT_IDS_CAP),
-    supa.from("staff").select("id,username,pin_hash,role,active").eq("gym_id", gymId).limit(100),
+    supa.from("staff").select("id,username,pin_hash,role,active").eq("gym_id", gymId).eq("active", true).limit(100),
   ]);
   if (products.error || productIds.error || staff.error) {
     console.error("pull", products.error?.message ?? productIds.error?.message ?? staff.error?.message);

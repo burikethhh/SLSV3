@@ -66,8 +66,11 @@ pub struct GateScan {
     pub gamma: f32,
     /// Best YuNet score, 0.0 when no face.
     pub face_score: f32,
-    /// Cosine match score when a member was recognized.
+    /// Cosine match score when a member was recognized (>= gate threshold).
     pub matched: Option<(String, f32)>,
+    /// Lookalike in [review, gate) — do NOT open; show "ask staff" + log score.
+    /// None when no candidate or when `matched` already hit.
+    pub review: Option<(String, f32)>,
     /// 512-d embedding when a face was found (for enroll flows).
     pub embedding: Option<Vec<f32>>,
 }
@@ -93,6 +96,20 @@ fn sessions() -> Result<&'static Sessions, String> {
 }
 
 fn load_sessions(dir: &Path) -> Result<Sessions, String> {
+    // Model integrity: reject swapped / truncated ONNX files before ORT loads
+    // them. Sizes: YuNet ~200KB, EdgeFace-XXS ~4.9MB. Wide bands so minor
+    // version bumps pass but a swapped model does not. Ship SHA256 pins
+    // alongside models for full verification (next step).
+    let det_path = dir.join(YUNET_FILENAME);
+    let rec_path = dir.join(EDGEFACE_FILENAME);
+    let det_len = std::fs::metadata(&det_path).map(|m| m.len()).unwrap_or(0);
+    let rec_len = std::fs::metadata(&rec_path).map(|m| m.len()).unwrap_or(0);
+    if !(100_000..=800_000).contains(&det_len) {
+        return Err(format!("refusing {YUNET_FILENAME}: unexpected size {det_len} bytes"));
+    }
+    if !(2_000_000..=12_000_000).contains(&rec_len) {
+        return Err(format!("refusing {EDGEFACE_FILENAME}: unexpected size {rec_len} bytes"));
+    }
     let detector = ort::session::Session::builder()
         .map_err(|e| e.to_string())?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
@@ -135,6 +152,7 @@ pub fn scan_frame(image: &RgbImage) -> Result<GateScan, String> {
             gamma: 1.0,
             face_score: 0.0,
             matched: None,
+            review: None,
             embedding: None,
         });
     }
@@ -147,6 +165,7 @@ pub fn scan_frame(image: &RgbImage) -> Result<GateScan, String> {
                 gamma: 1.0,
                 face_score: 0.0,
                 matched: None,
+                review: None,
                 embedding: None,
             })
         }
@@ -184,6 +203,7 @@ pub fn scan_frame(image: &RgbImage) -> Result<GateScan, String> {
         gamma,
         face_score,
         matched: None,
+        review: None,
         embedding,
     })
 }

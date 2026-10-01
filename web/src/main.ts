@@ -1,13 +1,26 @@
 // Hash router + RBAC guards. Code-split: ceo/owner bundles lazy-load.
 import { session, requireRole, roleOf, signIn, signUpOwner, signOut } from "./auth";
+import { icon } from "./ui";
 
 const view = () => document.getElementById("view")!;
 const nav = () => document.getElementById("nav")!;
+const layout = () => document.getElementById("layout")!;
 
-function navFor(role: string | null) {
-  if (role === "ceo") return [["#/ceo", "Overview"], ["#/ceo/fleet", "Fleet"], ["#/ceo/keys", "Key Vault"], ["#/ceo/users", "Users"], ["#/ceo/releases", "Releases"], ["#/ceo/audit", "Audit"]];
-  if (role === "owner" || role === "manager") return [["#/owner", "Overview"], ["#/owner/catalog", "Catalog"], ["#/owner/plans", "Plans"], ["#/owner/promos", "Promos"], ["#/owner/txns", "Live feed"], ["#/owner/staff", "Staff"], ["#/owner/keys", "Keys"]];
+function navFor(role: string | null): [string, string, string][] {
+  if (role === "ceo") return [["#/ceo", "Overview", "grid"], ["#/ceo/fleet", "Fleet", "gym"], ["#/ceo/keys", "Key Vault", "key"], ["#/ceo/users", "Users", "users"], ["#/ceo/releases", "Releases", "send"], ["#/ceo/audit", "Audit", "clock"]];
+  if (role === "owner" || role === "manager") return [["#/owner", "Overview", "chart"], ["#/owner/catalog", "Catalog", "box"], ["#/owner/plans", "Plans", "money"], ["#/owner/promos", "Promos", "tag"], ["#/owner/txns", "Live feed", "zap"], ["#/owner/staff", "Staff", "users"], ["#/owner/keys", "Keys", "key"]];
   return [];
+}
+
+/** Root tabs (#/ceo, #/owner) are active only on exact match; children match their own prefix. */
+function isActive(href: string, hash: string): boolean {
+  if (hash === href) return true;
+  if (href === "#/ceo" || href === "#/owner") return false;
+  return hash.startsWith(href + "/");
+}
+
+function closeDrawer() {
+  layout().classList.remove("open");
 }
 
 const homeFor = (role: string | null) => (role === "ceo" ? "#/ceo" : "#/owner");
@@ -20,20 +33,57 @@ function go(hash: string) {
   else location.hash = hash;
 }
 
-export async function route() {
+function startProgress() {
+  const p = document.getElementById("top-progress");
+  if (p) {
+    p.classList.remove("done");
+    p.hidden = false;
+  }
+}
+
+function stopProgress() {
+  const p = document.getElementById("top-progress");
+  if (p) {
+    p.classList.add("done");
+    setTimeout(() => {
+      if (p.classList.contains("done")) p.hidden = true;
+    }, 280);
+  }
+}
+
+async function renderRouteCore() {
   const s = await session();
   const role = s ? roleOf(s) : null;
   document.getElementById("logout")!.hidden = !s;
+  const ub = document.getElementById("user-badge");
+  if (ub) {
+    ub.hidden = !s;
+    const rb = document.getElementById("user-role-badge");
+    if (rb) {
+      if (role === "ceo") { rb.textContent = "S · CEO"; rb.className = "stat-badge badge-ultra"; }
+      else if (role === "owner") { rb.textContent = "A · OWNER"; rb.className = "stat-badge badge-pro"; }
+      else if (role === "manager") { rb.textContent = "B · MANAGER"; rb.className = "stat-badge badge-basic"; }
+      else { rb.textContent = "C · BASIC"; rb.className = "stat-badge badge-basic"; }
+    }
+  }
   document.getElementById("modal-root")!.innerHTML = ""; // no orphan modals across routes
   nav().innerHTML = "";
-  for (const [href, label] of navFor(role)) {
+  document.getElementById("sidebar")!.style.display = s ? "" : "none";
+  closeDrawer();
+  const h0 = location.hash || "#/";
+  for (const [href, label, ic] of navFor(role)) {
     const b = document.createElement("button");
-    b.textContent = label;
-    b.onclick = () => (location.hash = href);
+    b.className = "side-link" + (isActive(href, h0) ? " active" : "");
+    b.innerHTML = `<span class="side-ic">${icon(ic)}</span><span class="side-lb">${label}</span>`;
+    b.onclick = () => { location.hash = href; closeDrawer(); };
     nav().appendChild(b);
   }
 
-  const h = location.hash || "#/login";
+  const h = location.hash || "#/";
+  if (h === "#/" || h === "#") {
+    if (s) { go(homeFor(roleOf(s))); return; }
+    return (await import("./views/public")).renderLanding(view());
+  }
   if (!s && !h.startsWith("#/login") && !h.startsWith("#/register") && !h.startsWith("#/verify-license")) {
     location.hash = "#/login";
     return;
@@ -58,13 +108,23 @@ export async function route() {
   go(homeFor(role));
 }
 
+export async function route() {
+  startProgress();
+  try {
+    await renderRouteCore();
+  } finally {
+    stopProgress();
+  }
+}
+
 function renderPending() {
-  view().innerHTML = `<h2>Account not provisioned yet</h2>
+  view().innerHTML = `<div class="auth-wrap"><div class="glass-panel auth-card">
+    <h2>Account not provisioned yet</h2>
     <p class="muted">Your account exists but has no role. Ask the CEO to open
     <strong>Users</strong> and grant you <em>owner</em> (plus gym_ids) or <em>manager</em>,
     then sign out and back in to pick up the new claims.</p>
     <p class="muted">First install? The CEO role is granted once via
-    <strong>Bootstrap first CEO</strong> on the <a href="#/login">sign-in</a> page.</p>`;
+    <strong>Bootstrap first CEO</strong> on the <a href="#/login">sign-in</a> page.</p></div></div>`;
 }
 
 function loginMsg(text: string, color: string) {
@@ -73,19 +133,30 @@ function loginMsg(text: string, color: string) {
 }
 
 function renderLogin() {
-  view().innerHTML = `<h2>Sign in</h2><div class="row">
+  view().innerHTML = `<div class="auth-wrap"><div class="glass-panel auth-card">
+    <div id="brandlogo" style="margin: 0 auto 16px; width: 56px; height: 56px; border-radius: 14px; overflow: hidden; padding: 0; border: 1.5px solid rgba(139, 92, 246, 0.65); box-shadow: 0 0 20px rgba(139, 92, 246, 0.5);">
+      <img src="/icon.jpg" alt="SLS Emblem" style="width: 100%; height: 100%; object-fit: cover;" />
+    </div>
+    <h2 class="brand">SLS v3</h2>
+    <p class="muted" style="margin-top:-6px;margin-bottom:18px">SOLO LEVELING SYSTEM — sign in</p>
     <input id="em" placeholder="email" /><input id="pw" type="password" placeholder="password" />
-    <button class="primary" id="go">Sign in</button></div>
+    <button class="primary" id="go">Sign in</button>
     <p id="login-msg" class="muted"></p>
-    <div class="row" style="margin-top:12px">
+    <div class="auth-links">
       <button id="bootstrap">Bootstrap first CEO</button>
       <a href="#/register">Register owner account</a>
-      <span id="boot-msg" class="muted"></span>
     </div>
-    <p class="muted">Bootstrap grants <code>role=ceo</code> to the signed-in user only if no CEO exists yet (5/hr/IP).</p>`;
-  (document.getElementById("go") as HTMLButtonElement).onclick = async () => {
+    <p><span id="boot-msg" class="muted"></span></p>
+    <ul class="feat-list"><li>Offline-first POS + face gate terminal</li><li>Per-gym licensing with remote kill switch</li><li>CEO / owner / manager roles</li></ul>
+    <p class="muted">Bootstrap grants <code>role=ceo</code> to the signed-in user only if no CEO exists yet (5/hr/IP).</p>
+  </div></div>`;
+  (document.getElementById("go") as HTMLButtonElement).onclick = async (ev) => {
+    const btn = ev.currentTarget as HTMLButtonElement;
     const em = (document.getElementById("em") as HTMLInputElement).value;
     const pw = (document.getElementById("pw") as HTMLInputElement).value;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    btn.textContent = "Signing in…";
     try {
       await signIn(em, pw);
       // Land on the right dashboard for the role — owners used to bounce off
@@ -94,6 +165,9 @@ function renderLogin() {
       go(homeFor(s ? roleOf(s) : null));
     } catch (e) {
       loginMsg(String((e as Error).message ?? e), "#f87171");
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      btn.textContent = "Sign in";
     }
   };
   (document.getElementById("bootstrap") as HTMLButtonElement).onclick = async () => {
@@ -119,14 +193,25 @@ function renderLogin() {
 }
 
 function renderRegister() {
-  view().innerHTML = `<h2>Owner register</h2><div class="row">
+  view().innerHTML = `<div class="auth-wrap"><div class="glass-panel auth-card">
+    <div id="brandlogo" style="margin: 0 auto 16px; width: 56px; height: 56px; border-radius: 14px; overflow: hidden; padding: 0; border: 1.5px solid rgba(139, 92, 246, 0.65); box-shadow: 0 0 20px rgba(139, 92, 246, 0.5);">
+      <img src="/icon.jpg" alt="SLS Emblem" style="width: 100%; height: 100%; object-fit: cover;" />
+    </div>
+    <h2 class="brand">SYSTEM REGISTER</h2>
+    <p class="muted" style="margin-top:-6px;margin-bottom:18px">Create system owner account</p>
     <input id="em" placeholder="email" /><input id="pw" type="password" placeholder="min 8 chars" />
-    <button class="primary" id="go">Register</button></div>
+    <button class="primary" id="go">Register</button>
     <p id="login-msg" class="muted"></p>
-    <p class="muted">After register + sign-in, ask CEO to grant <strong>owner</strong> + gym_ids under Users (JWT claims required for RLS).</p>`;
-  (document.getElementById("go") as HTMLButtonElement).onclick = async () => {
+    <p class="muted">After register + sign-in, ask CEO to grant <strong>owner</strong> + gym_ids under Users (JWT claims required for RLS).</p>
+    <div class="auth-links"><a href="#/login">← Back to sign in</a></div>
+  </div></div>`;
+  (document.getElementById("go") as HTMLButtonElement).onclick = async (ev) => {
+    const btn = ev.currentTarget as HTMLButtonElement;
     const em = (document.getElementById("em") as HTMLInputElement).value;
     const pw = (document.getElementById("pw") as HTMLInputElement).value;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    btn.textContent = "Registering…";
     try {
       await signUpOwner(em, pw);
       const s = await session();
@@ -134,6 +219,10 @@ function renderRegister() {
       else loginMsg("Check your email to confirm the account, then sign in.", "#34d399");
     } catch (e) {
       loginMsg(String((e as Error).message ?? e), "#f87171");
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      btn.textContent = "Register";
     }
   };
 }
@@ -142,5 +231,16 @@ document.getElementById("logout")!.onclick = async () => {
   await signOut();
   void route(); // hash may already be #/login → no hashchange → render manually
 };
+// Collapsing sidebar: rail on desktop (persisted), overlay drawer on mobile.
+if (localStorage.getItem("sls.rail") === "1") layout().classList.add("rail");
+document.getElementById("nav-toggle")!.onclick = () => {
+  if (window.matchMedia("(max-width: 900px)").matches) layout().classList.toggle("open");
+  else {
+    const rail = !layout().classList.contains("rail");
+    layout().classList.toggle("rail", rail);
+    localStorage.setItem("sls.rail", rail ? "1" : "0");
+  }
+};
+document.getElementById("scrim")!.onclick = closeDrawer;
 window.addEventListener("hashchange", route);
 route();

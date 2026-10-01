@@ -43,7 +43,9 @@ pub fn conn() -> &'static Mutex<Connection> {
              CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, op TEXT NOT NULL, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
              CREATE TABLE IF NOT EXISTS license_cache(token TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS staff_cache(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, pin_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1);",
+             CREATE TABLE IF NOT EXISTS staff_cache(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, pin_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1);
+             CREATE INDEX IF NOT EXISTS idx_attendance_member_created ON attendance_logs(member_id, created_at);
+             CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(created_at);",
         )
         .expect("migrate");
         Mutex::new(c)
@@ -122,6 +124,122 @@ pub fn log_checkin(member_id: &str, confidence: f32) -> rusqlite::Result<String>
         params![id, payload],
     )?;
     Ok(id)
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct AttendanceRow {
+    pub id: String,
+    pub member_id: String,
+    pub full_name: String,
+    pub confidence: f32,
+    pub created_at: String,
+    pub visits_today: u32,
+    pub total_visits: u32,
+    pub rank: String,
+}
+
+pub fn calculate_hunter_rank(total_visits: u32) -> &'static str {
+    match total_visits {
+        100.. => "S",
+        50..=99 => "A",
+        25..=49 => "B",
+        10..=24 => "C",
+        5..=9 => "D",
+        _ => "E",
+    }
+}
+
+/// Manual override of the gate (e.g. from topbar button, shortcut, or receptionist).
+/// Logs an explicit record to attendance_logs and enqueues to outbox for cloud audit.
+pub fn log_manual_override(operator: Option<&str>) -> rusqlite::Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let db = conn().lock().unwrap();
+    let op_name = operator.unwrap_or("Staff Manual Override");
+    db.execute(
+        "INSERT INTO attendance_logs(id, member_id, confidence) VALUES(?1, 'MANUAL_OVERRIDE', 1.0)",
+        params![id],
+    )?;
+    let created_at: String = db
+        .query_row(
+            "SELECT created_at FROM attendance_logs WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
+    let payload = serde_json::json!({
+        "id": id,
+        "member_id": "MANUAL_OVERRIDE",
+        "full_name": "MANUAL GATE OVERRIDE",
+        "operator": op_name,
+        "confidence": 1.0,
+        "created_at": created_at,
+    })
+    .to_string();
+    let _ = db.execute(
+        "INSERT INTO outbox(id, op, payload) VALUES(?1,'attendance',?2)
+         ON CONFLICT(id) DO NOTHING",
+        params![id, payload],
+    );
+    Ok(id)
+}
+
+/// Recent attendance logs joined with members (or fallback name).
+pub fn attendance_list(limit: u32) -> rusqlite::Result<Vec<AttendanceRow>> {
+    let db = conn().lock().unwrap();
+    let mut st = db.prepare(
+        "SELECT a.id, a.member_id, 
+                CASE 
+                    WHEN a.member_id = 'MANUAL_OVERRIDE' THEN 'MANUAL GATE OVERRIDE'
+                    ELSE coalesce(m.full_name, 'Hunter ' || substr(a.member_id, 1, 8))
+                END, 
+                a.confidence, a.created_at,
+                CASE 
+                    WHEN a.member_id = 'MANUAL_OVERRIDE' THEN 1
+                    ELSE (
+                        SELECT count(*) 
+                        FROM attendance_logs al 
+                        WHERE al.member_id = a.member_id 
+                          AND date(al.created_at) = date(a.created_at)
+                          AND al.created_at <= a.created_at
+                    )
+                END as visits_today,
+                CASE 
+                    WHEN a.member_id = 'MANUAL_OVERRIDE' THEN 1
+                    ELSE (
+                        SELECT count(*) 
+                        FROM attendance_logs al 
+                        WHERE al.member_id = a.member_id 
+                          AND al.created_at <= a.created_at
+                    )
+                END as total_visits
+         FROM attendance_logs a
+         LEFT JOIN members m ON m.id = a.member_id
+         ORDER BY a.created_at DESC
+         LIMIT ?1",
+    )?;
+    let rows = st
+        .query_map(params![limit], |r| {
+            let member_id: String = r.get(1)?;
+            let visits_today: u32 = r.get(5)?;
+            let total_visits: u32 = r.get(6)?;
+            let rank = if member_id == "MANUAL_OVERRIDE" {
+                "OVERRIDE".to_string()
+            } else {
+                calculate_hunter_rank(total_visits).to_string()
+            };
+            Ok(AttendanceRow {
+                id: r.get(0)?,
+                member_id,
+                full_name: r.get(2)?,
+                confidence: r.get(3)?,
+                created_at: r.get(4)?,
+                visits_today,
+                total_visits,
+                rank,
+            })
+        })?
+        .collect();
+    rows
 }
 
 // ── Outbox (offline-first push queue; see crates/sls-core/src/sync.rs) ────────
@@ -229,18 +347,73 @@ pub fn staff_locked() -> rusqlite::Result<bool> {
 }
 
 /// Verify a terminal PIN against the local cache. Returns the staff `role`
-/// on success, None for unknown user / inactive / bad PIN.
+/// on success, None for unknown user / inactive / bad PIN / locked out.
+/// Brute-force guard: 5 fails → 5-min lockout per username + ~300ms delay
+/// on failure (Argon2id is already slow; this stops fast PIN sweeps).
+/// Old 4-digit PINs still verify — the 6-digit minimum is enforced at
+/// creation (`staff-create`); owners should rotate short PINs.
 pub fn staff_verify(username: &str, pin: &str) -> rusqlite::Result<Option<String>> {
-    let db = conn().lock().unwrap();
-    let row = db.query_row(
-        "SELECT pin_hash, role, active FROM staff_cache WHERE username=?1",
-        params![username.trim().to_lowercase()],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
-    );
-    match row {
-        Ok((hash, role, active)) if active == 1 && sls_core::auth::verify_password(pin, &hash) => Ok(Some(role)),
-        _ => Ok(None),
+    let user = username.trim().to_lowercase();
+    let lock_key = format!("pin_lock_{user}");
+    let fail_key = format!("pin_fail_{user}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let locked_until: i64 = conn()
+        .lock()
+        .unwrap()
+        .query_row("SELECT value FROM settings WHERE key=?1", params![lock_key], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if locked_until > now {
+        return Ok(None);
     }
+    let (hash, role, active): (String, String, i64) = {
+        let db = conn().lock().unwrap();
+        match db.query_row(
+            "SELECT pin_hash, role, active FROM staff_cache WHERE username=?1",
+            params![user],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                drop(db);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                return Ok(None);
+            }
+        }
+    };
+    if active == 1 && sls_core::auth::verify_password(pin, &hash) {
+        let db = conn().lock().unwrap();
+        let _ = db.execute("DELETE FROM settings WHERE key=?1 OR key=?2", params![lock_key, fail_key]);
+        return Ok(Some(role));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let db = conn().lock().unwrap();
+    let fails: i64 = db
+        .query_row("SELECT value FROM settings WHERE key=?1", params![fail_key], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        + 1;
+    let _ = db.execute(
+        "INSERT INTO settings(key, value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![fail_key, fails.to_string()],
+    );
+    if fails >= 5 {
+        let _ = db.execute(
+            "INSERT INTO settings(key, value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![lock_key, (now + 300).to_string()],
+        );
+        let _ = db.execute("DELETE FROM settings WHERE key=?1", params![fail_key]);
+    }
+    Ok(None)
 }
 
 // ── License cache + heartbeat (kill-switch e2e state) ─────────────────────────

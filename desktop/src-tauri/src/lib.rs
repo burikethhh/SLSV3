@@ -56,6 +56,11 @@ fn gate_checkin(member_id: String, confidence: f32) -> Result<String, String> {
     db::log_checkin(&member_id, confidence).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn attendance_list(limit: Option<u32>) -> Result<Vec<db::AttendanceRow>, String> {
+    db::attendance_list(limit.unwrap_or(20)).map_err(|e| e.to_string())
+}
+
 // ── Face pipeline: canvas frame → YuNet+EdgeFace → match FaceStore ────────────
 
 #[cfg(feature = "face-ort")]
@@ -64,7 +69,16 @@ fn gate_scan_frame(data_url: String) -> Result<face_pipeline::GateScan, String> 
     let img = face_pipeline::decode_base64_image(&data_url)?;
     let mut scan = face_pipeline::scan_frame(&img)?;
     if let Some(emb) = scan.embedding.as_ref() {
-        scan.matched = face_store().read().match_best(emb);
+        let store = face_store().read();
+        scan.matched = store.match_best(emb);
+        // Lookalike path: score in [review, gate) → UI shows "ask staff"
+        // with the score logged via gate_checkin confidence on manual approve.
+        // Never opens the maglock on face alone.
+        scan.review = if scan.matched.is_none() {
+            store.best_candidate(emb)
+        } else {
+            None
+        };
     }
     Ok(scan)
 }
@@ -225,6 +239,96 @@ async fn update_check() -> Result<serde_json::Value, String> {
     Err("cloud-sync feature not enabled in this build".into())
 }
 
+// ── Auto-update (tauri-plugin-updater; signed NSIS via updates-check) ───────
+// Boot installs silently in the background — offline-safe, any failure just
+// logs and the gate keeps running. Completion is recorded in the
+// `pending_restart` setting, which the gate + settings views surface as a
+// restart banner. Manual path: Settings → Check → Install → Restart.
+
+#[cfg(feature = "cloud-sync")]
+async fn fetch_update(app: &tauri::AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    app.updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "cloud-sync")]
+async fn install_update(app: &tauri::AppHandle) -> Result<String, String> {
+    let Some(update) = fetch_update(app).await? else {
+        return Ok("already latest".into());
+    };
+    let version = update.version.clone();
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    db::set_setting("pending_restart", &version).map_err(|e| e.to_string())?;
+    Ok(version)
+}
+
+/// Headless-safe probe: is there anything newer on the releases feed?
+/// Downloads nothing — used by E2E + Settings.
+#[cfg(feature = "cloud-sync")]
+#[tauri::command]
+async fn update_pending(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    Ok(fetch_update(&app).await?.map(|u| u.version))
+}
+
+#[cfg(not(feature = "cloud-sync"))]
+#[tauri::command]
+async fn update_pending() -> Result<Option<String>, String> {
+    Err("cloud-sync feature not enabled in this build".into())
+}
+
+/// Check + download + install. On Windows the app exits during install (NSIS
+/// limitation) — the caller restarts via `restart_app` after user confirmation.
+#[cfg(feature = "cloud-sync")]
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<String, String> {
+    install_update(&app).await
+}
+
+#[cfg(not(feature = "cloud-sync"))]
+#[tauri::command]
+async fn update_install() -> Result<String, String> {
+    Err("cloud-sync feature not enabled in this build".into())
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
+#[cfg(feature = "cloud-sync")]
+fn start_update_task(app: tauri::AppHandle) {
+    // tauri::async_runtime, NOT tokio::spawn: setup has no Tokio runtime
+    // context yet and a bare spawn panics (exit 101) on boot.
+    tauri::async_runtime::spawn(async move {
+        // Let the gate come up first; a slow/failed check must never block boot.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        // Don't re-download while a restart is already pending.
+        let pending = db::get_setting("pending_restart")
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty());
+        if pending.is_some() {
+            return;
+        }
+        match install_update(&app).await {
+            Ok(v) if v != "already latest" => {
+                eprintln!("auto-update installed v{v} — restart pending")
+            }
+            Ok(_) => {
+                let _ = db::set_setting("pending_restart", "");
+            }
+            Err(e) => eprintln!("auto-update check failed (offline?): {e}"),
+        }
+    });
+}
+
 #[cfg(feature = "cloud-sync")]
 fn start_sync(url: String, token: String, gym_id: String) {
     let worker = sync_worker::SyncWorker {
@@ -274,6 +378,21 @@ fn license_mgr() -> Arc<license_verify::LicenseManager> {
 
 // ── Hardware — stubs without `hardware-serial` so generate_handler stays static ─
 
+#[tauri::command]
+fn hw_manual_override(operator: Option<String>, duration_ms: Option<u32>) -> Result<String, String> {
+    let op = operator.as_deref().unwrap_or("Kiosk Staff Button");
+    let _ = db::log_manual_override(Some(op));
+    #[cfg(feature = "hardware-serial")]
+    {
+        hw().unlock_door(duration_ms.unwrap_or(3000))
+    }
+    #[cfg(not(feature = "hardware-serial"))]
+    {
+        let _ = duration_ms;
+        Ok("unlocked manual override (no hardware-serial)".into())
+    }
+}
+
 #[cfg(feature = "hardware-serial")]
 #[tauri::command]
 fn hw_unlock(duration_ms: Option<u32>) -> Result<String, String> {
@@ -283,7 +402,7 @@ fn hw_unlock(duration_ms: Option<u32>) -> Result<String, String> {
 #[cfg(not(feature = "hardware-serial"))]
 #[tauri::command]
 fn hw_unlock(_duration_ms: Option<u32>) -> Result<String, String> {
-    Err("hardware-serial feature not enabled in this build".into())
+    Ok("unlocked (no hardware-serial)".into())
 }
 
 #[cfg(feature = "hardware-serial")]
@@ -361,11 +480,20 @@ pub fn run() {
             // Restore cached license (offline-safe) + resume sync when enabled.
             boot_license();
             spawn_hw_supervisor();
+            #[cfg(feature = "cloud-sync")]
+            {
+                // Updater must never break the gate: init failure just logs.
+                if let Err(e) = app.handle().plugin(tauri_plugin_updater::Builder::new().build()) {
+                    eprintln!("updater plugin init failed: {e}");
+                }
+                start_update_task(app.handle().clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             pos_checkout,
             gate_checkin,
+            attendance_list,
             gate_scan_frame,
             product_search,
             member_search,
@@ -380,7 +508,11 @@ pub fn run() {
             settings_lock_state,
             staff_verify,
             update_check,
+            update_pending,
+            update_install,
+            restart_app,
             hw_unlock,
+            hw_manual_override,
             hw_connect,
             hw_status,
         ])

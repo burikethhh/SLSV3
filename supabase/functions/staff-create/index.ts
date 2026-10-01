@@ -27,7 +27,7 @@ serve(async (req) => {
   if (!gym_id || !full_name || !username) return new Response("bad fields", { status: 400 });
   const uname = String(username).trim().toLowerCase();
   if (!/^[a-z0-9_.-]{2,32}$/.test(uname)) return new Response("username must be 2-32 chars (a-z 0-9 _ . -)", { status: 400 });
-  if (!/^\d{4,6}$/.test(String(pin ?? ""))) return new Response("pin must be 4-6 digits", { status: 400 });
+  if (!/^\d{6,12}$/.test(String(pin ?? ""))) return new Response("pin must be 6-12 digits", { status: 400 });
   if (!["staff", "manager"].includes(role)) return new Response("bad role", { status: 400 });
   if (meta.role === "owner" && !(meta.gym_ids ?? []).includes(gym_id)) {
     return new Response("not your gym", { status: 403 });

@@ -24,7 +24,7 @@ async function j(res) {
 async function main() {
   const ts = Date.now();
   const ceoEmail = `ceo.e2e.1790267997223@acme.test`;
-  const pw = "TempE2ePass99!";
+  const pw = "E2ePassw0rd!xyz"; // shared with e2e-license/e2e-fixes (do NOT diverge)
 
   // reset CEO password for harness
   const users = await j(await fetch(`${base}/auth/v1/admin/users?page=1&per_page=200`, { headers: hs() }));
@@ -111,6 +111,11 @@ async function main() {
   // updates-check: public GET (verify_jwt=false), no auth header
   const upd = await j(await fetch(`${base}/functions/v1/updates-check?current=0.0.1&channel=stable`));
   ok("updates-check.public_get", upd.status === 200 && typeof upd.body?.update === "boolean", JSON.stringify(upd.body).slice(0, 150));
+  ok("updates-check.app_update", upd.body?.update === true && typeof upd.body?.version === "string" && typeof upd.body?.url === "string", `version=${upd.body?.version}`);
+  const tm = await j(await fetch(`${base}/functions/v1/updates-check?format=tauri&current=0.0.1&channel=stable`));
+  ok("updates-check.tauri_manifest", tm.status === 200 && typeof tm.body?.version === "string" && typeof tm.body?.url === "string" && (tm.body?.signature ?? "").length > 100, `version=${tm.body?.version} sig_len=${(tm.body?.signature ?? "").length}`);
+  const tn = await j(await fetch(`${base}/functions/v1/updates-check?format=tauri&current=9.9.9&channel=stable`));
+  ok("updates-check.tauri_204", tn.status === 204, `status=${tn.status}`);
 
   // ── kill → remote_disabled ──
   await j(await fetch(`${base}/functions/v1/gym-admin`, {

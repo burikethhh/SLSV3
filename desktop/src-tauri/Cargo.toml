@@ -1,6 +1,6 @@
 [package]
 name = "sls-desktop"
-version = "3.0.0"
+version = "3.0.2"
 edition = "2021"
 
 # Slim Tauri v2 shell. Excluded from default workspace build (needs system webview + ort native lib).
@@ -27,6 +27,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg"], optio
 serialport = { version = "4.5", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tokio = { version = "1", features = ["rt", "macros", "time"], optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
 
 [features]
 # Release flavor = all three: a gate build without face-ort/hardware-serial/cloud-sync
@@ -34,7 +35,7 @@ tokio = { version = "1", features = ["rt", "macros", "time"], optional = true }
 default = ["face-ort", "hardware-serial", "cloud-sync"]
 face-ort = ["dep:ort", "dep:image"]       # YuNet + EdgeFace via ONNX Runtime
 hardware-serial = ["dep:serialport"]       # ESP32 gate controller
-cloud-sync = ["dep:reqwest", "dep:tokio"]  # PostgREST outbox + kill-switch poll
+cloud-sync = ["dep:reqwest", "dep:tokio", "dep:tauri-plugin-updater"]  # PostgREST outbox + kill-switch poll + signed auto-update
 
 # Root workspace excludes this crate, so keep the tuned profile here.
 [profile.release]
