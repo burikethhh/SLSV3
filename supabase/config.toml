@@ -2,6 +2,11 @@
 id = "tlfytevjhzcgrttcdipq"
 name = "sls-v3"
 
+# Dashboard-managed (config push ignores it): Auth → Configuration → Rate limits.
+# Raise to 60 now that custom SMTP (Resend) is saved.
+[auth.rate_limit]
+email_sent = 60
+
 # sync auth = license token (GPOS-…), not a Supabase JWT — platform must not reject it.
 [functions.sync]
 verify_jwt = false
