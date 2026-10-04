@@ -1,6 +1,6 @@
 // Desktop-leg E2E: issue key → Rust verify (separate cargo step) → sync push
 // → kill-switch remote_disabled → re-enable → audit.
-const base = "https://cjxpsiuvwihanxqccpnf.supabase.co";
+const base = "https://tlfytevjhzcgrttcdipq.supabase.co";
 import { readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 

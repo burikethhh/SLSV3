@@ -1,6 +1,6 @@
 // Full license-distribution E2E against live project. Uses service_role only to
 // admin-create confirmed users (avoid email rate limit); all business ops use user JWTs.
-const base = "https://cjxpsiuvwihanxqccpnf.supabase.co";
+const base = "https://tlfytevjhzcgrttcdipq.supabase.co";
 import { readFileSync } from "node:fs";
 
 const env = readFileSync("B:/Projects/SoloLeveling/web/.env", "utf8");

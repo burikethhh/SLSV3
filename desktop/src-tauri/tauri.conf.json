@@ -24,7 +24,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzNjk0RTEzODk0RTE0MDcKUldRSEZFNkpFMDVwWThsYTlvR2tOM21ITEgzR3EzZTVWcDk4bFZKSmRWTDVrVFN4NXAzWHpDZkIK",
       "endpoints": [
-        "https://cjxpsiuvwihanxqccpnf.supabase.co/functions/v1/updates-check?format=tauri&current={{current_version}}&channel=stable"
+        "https://tlfytevjhzcgrttcdipq.supabase.co/functions/v1/updates-check?format=tauri&current={{current_version}}&channel=stable"
       ]
     }
   }

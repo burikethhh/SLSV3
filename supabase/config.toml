@@ -1,5 +1,5 @@
 [project]
-id = "cjxpsiuvwihanxqccpnf"
+id = "tlfytevjhzcgrttcdipq"
 name = "sls-v3"
 
 # sync auth = license token (GPOS-…), not a Supabase JWT — platform must not reject it.

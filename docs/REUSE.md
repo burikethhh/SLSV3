@@ -93,7 +93,7 @@ Output: `desktop/src-tauri/target/release/GymPOS.exe` (portable) and
   `opt-level 3, codegen-units 1, lto, strip`.
 
 ## Supabase deploy — done (2026-09-24, 0005 added 2026-09-27)
-Project ref `cjxpsiuvwihanxqccpnf` · CLI 2.117.0 · secrets + `db push` (0001–0005) + 9 Edge Fns deployed.
+Project ref `tlfytevjhzcgrttcdipq` · CLI 2.117.0 · secrets + `db push` (0001–0005) + 9 Edge Fns deployed.
 `sync` AND `updates-check` have `verify_jwt=false` (sync auth = GPOS license token; updates-check is a
 public desktop GET with in-fn rate limit; both pinned in `supabase/config.toml`).
 **All other fns must stay `verify_jwt=true`** — a `functions deploy` without the flag flips the
@@ -107,7 +107,7 @@ foreach ($fn in @('sync','updates-check','license-issue','license-verify','licen
 }
 # deploy resets verify_jwt=true — re-patch the two public fns (terminals get 401 otherwise):
 # foreach ($fn in @('sync','updates-check')) {
-#   Invoke-RestMethod -Method Patch "https://api.supabase.com/v1/projects/cjxpsiuvwihanxqccpnf/functions/$fn" `
+#   Invoke-RestMethod -Method Patch "https://api.supabase.com/v1/projects/tlfytevjhzcgrttcdipq/functions/$fn" `
 #     -Headers @{Authorization="Bearer $PAT"} -Body '{"verify_jwt":false}' -ContentType "application/json"
 # }
 # Rotate license key: edit supabase/RSA_PRIVATE_KEY_PEM.txt then set BOTH PEM secrets
@@ -126,7 +126,7 @@ $pub  = [IO.File]::ReadAllText("supabase\RSA_PUBLIC_KEY_PEM.txt").Trim()  -repla
 JWT from the api-keys list — a freshly POSTed `{"type":"secret"}` key (`sb_secret_…`)
 is rejected by `/auth/v1/admin` with `Invalid API key`:
 ```powershell
-$pat = "sbp_…"; $ref = "cjxpsiuvwihanxqccpnf"
+$pat = "sbp_…"; $ref = "tlfytevjhzcgrttcdipq"
 $list = Invoke-RestMethod -Headers @{Authorization="Bearer $pat"} "https://api.supabase.com/v1/projects/$ref/api-keys"
 $env:SUPABASE_SERVICE_ROLE_KEY = ($list | Where-Object { $_.type -eq "legacy" -and $_.name -eq "service_role" }).api_key
 node scripts\e2e\e2e-license.mjs   # 26 checks

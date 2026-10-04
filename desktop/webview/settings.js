@@ -4,7 +4,7 @@
 // controller reconnect.
 const invoke = window.__TAURI__?.core?.invoke;
 
-const DEFAULT_URL = "https://cjxpsiuvwihanxqccpnf.supabase.co";
+const DEFAULT_URL = "https://tlfytevjhzcgrttcdipq.supabase.co";
 let unlocked = false; // session-only; a restart re-locks
 
 export async function initSettings() {

@@ -1,5 +1,5 @@
 // Spot-checks for 0005 + user-admin list + owner scope fix.
-const base = "https://cjxpsiuvwihanxqccpnf.supabase.co";
+const base = "https://tlfytevjhzcgrttcdipq.supabase.co";
 import { readFileSync } from "node:fs";
 const env = readFileSync("B:/Projects/SoloLeveling/web/.env", "utf8");
 const anon = env.match(/VITE_SUPABASE_ANON_KEY=(.+)/)?.[1]?.trim();
