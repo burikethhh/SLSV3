@@ -42,6 +42,13 @@ workspace (needs MSVC + system webview) — run cargo from `desktop/src-tauri`.
 - `SoloLeveling/web` (sls-v3-web, deployed on Vercel)
 - `SoloLeveling/desktop` (GymPOS Tauri app)
 
+## Domain & Deployment Policy (CRITICAL)
+
+- **NEVER use, bind, alias, or route `keth.website` or `www.keth.website` to this project (SoloLeveling / SLS).**
+- `keth.website` and `www.keth.website` are strictly reserved for the user's personal portfolio (`keth-website`).
+- The web dashboard for SoloLeveling must strictly and exclusively use **`https://sls.keth.website`** (and `https://sls-v3-web.vercel.app`).
+- Any deployment scripts, Vercel commands, or configuration files must NEVER assign or touch `keth.website` or `www.keth.website`.
+
 ## Conventions
 
 - Prefer editing existing files over creating new ones; match the style already in the repo.
@@ -49,3 +56,4 @@ workspace (needs MSVC + system webview) — run cargo from `desktop/src-tauri`.
 - After changing code run the project's `lint` / `build` / `test` before declaring done.
 - Report the exact commands you ran and their output.
 - Deploy notes + migration/Edge-Fn runbooks: `docs/REUSE.md`.
+

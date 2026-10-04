@@ -8,6 +8,7 @@ alwaysApply: false
 
 - Path: `B:\Projects\SoloLeveling` — type: Git repo + Node + Rust
 - From the workspace root: `npm run dev -- SoloLeveling` (also `build`, `test`, `lint`, `install`)
-- Workspace member: no
 - Never commit `.env`, secrets or `node_modules`.
+- CRITICAL: Never use, bind, or alias `keth.website` or `www.keth.website` to SoloLeveling (that is the user's personal portfolio). SLS must strictly use `sls.keth.website`.
 - Verify with the project's lint/build/test before finishing.
+
