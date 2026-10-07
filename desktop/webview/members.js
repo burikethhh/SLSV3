@@ -178,7 +178,7 @@ function startEnrollLoop() {
 
     try {
       const dataUrl = grabFrame(v);
-      const scan = await invoke("gate_scan_frame", { dataUrl });
+      const scan = await invoke("gate_scan_frame", { data_url: dataUrl });
       if (expEl && scan?.exposure) {
         const gamma = scan.gamma && scan.gamma !== 1 ? ` · γ=${scan.gamma.toFixed(2)}` : "";
         expEl.textContent = `${scan.exposure.toUpperCase()}${gamma}`;
@@ -347,7 +347,7 @@ async function enroll() {
 
   try {
     const dataUrl = grabFrame(video);
-    const scan = await invoke("gate_scan_frame", { dataUrl });
+    const scan = await invoke("gate_scan_frame", { data_url: dataUrl });
     if (!scan?.embedding) {
       if (msg) {
         msg.textContent = scan?.exposure === "Unusable"
@@ -359,7 +359,7 @@ async function enroll() {
     }
 
     const memberId = crypto.randomUUID();
-    await invoke("face_enroll", { memberId, fullName: name, embedding: scan.embedding });
+    await invoke("face_enroll", { member_id: memberId, full_name: name, embedding: scan.embedding });
 
     if (msg) {
       msg.textContent = `Successfully Enrolled “${name}” (${(scan.face_score * 100).toFixed(0)}% lock confidence).`;

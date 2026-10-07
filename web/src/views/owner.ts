@@ -64,7 +64,7 @@ async function overview(root: HTMLElement, s: Session, token: number) {
     const [{ data: sales }, { data: att }, { count: members }, { data: products }, { data: gyms },
       { count: nProducts }, { count: nPlans }, { count: nPromos }, { count: nStaff }, { count: nKeys }] = await Promise.all([
       scope(db().from("sales").select("total_cents,created_at,gym_id,items,status").order("created_at", { ascending: false }).limit(500), s),
-      scope(db().from("attendance").select("created_at,gym_id,member_id").order("created_at", { ascending: false }).limit(500), s),
+      scope(db().from("attendance").select("created_at,gym_id,member_id,direction").order("created_at", { ascending: false }).limit(500), s),
       scope(db().from("members").select("id", { count: "exact", head: true }).is("deleted_at", null), s),
       scope(db().from("products").select("id,name").limit(500), s),
       db().from("gyms").select("id,name").order("name"),
@@ -80,13 +80,15 @@ async function overview(root: HTMLElement, s: Session, token: number) {
     const salesRows = (sales ?? []).filter((r) => (r.status ?? "sale") !== "void");
     const signed = (r: { total_cents: number; status?: string }) =>
       (r.status ?? "sale") === "refund" ? -Number(r.total_cents) : Number(r.total_cents);
-    // Manual gate overrides sync with member_id=null — keep them out of
-    // foot-traffic stats (audit trail only, not visits).
-    const attRows = (att ?? []).filter((a) => a.member_id);
+    // Verified check-ins (face entry): member_id present + direction is 'in'.
+    // Exits (button out) have direction 'out'. Overrides have member_id null.
+    const attRows = (att ?? []).filter((a) => a.member_id && (a.direction === "in" || !a.direction));
+    const exitRows = (att ?? []).filter((a) => a.direction === "out");
     const monthRev = salesRows.filter((r) => new Date(r.created_at) >= monthStart).reduce((a, r) => a + signed(r), 0);
     const todaySales = salesRows.filter((r) => new Date(r.created_at) >= dayStart);
     const todayRev = todaySales.reduce((a, r) => a + signed(r), 0);
     const todayAtt = attRows.filter((a) => new Date(a.created_at) >= dayStart);
+    const todayExits = exitRows.filter((a) => new Date(a.created_at) >= dayStart);
     // 30-day revenue trend
     const days: string[] = [];
     const dayTotals = new Array(30).fill(0);
@@ -138,7 +140,7 @@ async function overview(root: HTMLElement, s: Session, token: number) {
       <div class="cards" id="ov-cards">
       ${stat("Month POS revenue", pesos(monthRev), "emerald", "money", "POS sales this calendar month (refunds subtracted, voids excluded)")}
       ${stat("Today POS revenue", pesos(todayRev), "emerald", "chart", `${todaySales.length} sales today`)}
-      ${stat("Check-ins today", String(todayAtt.length), "sky", "zap", "gate entries since midnight")}
+      ${stat("Check-ins today", String(todayAtt.length), "sky", "zap", todayExits.length ? `${todayExits.length} exits · entries since midnight` : "gate entries since midnight")}
       ${stat("Active members", String(members ?? 0), "violet", "users", "across your gyms")}</div>
       <div class="charts-grid">
         <div class="glass-panel panel"><div class="stat-k" style="margin-bottom:8px">30-day revenue trend (₱)</div>

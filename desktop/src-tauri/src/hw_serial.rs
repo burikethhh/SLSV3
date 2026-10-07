@@ -10,6 +10,13 @@
 #[cfg(feature = "hardware-serial")]
 pub use inner::*;
 
+#[cfg(not(feature = "hardware-serial"))]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HardwareButtonEvent {
+    pub kind: String,
+    pub timestamp_ms: u64,
+}
+
 #[cfg(feature = "hardware-serial")]
 mod inner {
     use parking_lot::Mutex;
@@ -19,7 +26,7 @@ mod inner {
 
     #[derive(Debug, Clone, serde::Serialize)]
     pub struct HardwareButtonEvent {
-        pub kind: String, // "entry_btn" (v3 single-cam; exit_btn retired)
+        pub kind: String, // "entry_btn" or "exit_btn"
         pub timestamp_ms: u64,
     }
 
@@ -115,8 +122,19 @@ mod inner {
                                 if b == b'\n' {
                                     let text = String::from_utf8_lossy(&line).trim().to_string();
                                     line.clear();
-                                    // v3 single-cam: only ENTRY_BTN armed
-                                    if text == "EVT:ENTRY_BTN" {
+                                    if text == "EVT:EXIT_BTN" {
+                                        let _ = crate::db::log_exit_button();
+                                        let mut q = events.lock();
+                                        if q.len() < 16 {
+                                            q.push(HardwareButtonEvent {
+                                                kind: "exit_btn".into(),
+                                                timestamp_ms: std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_millis() as u64)
+                                                    .unwrap_or(0),
+                                            });
+                                        }
+                                    } else if text == "EVT:ENTRY_BTN" {
                                         let mut q = events.lock();
                                         if q.len() < 16 {
                                             q.push(HardwareButtonEvent {

@@ -7,6 +7,19 @@ name = "sls-v3"
 [auth.rate_limit]
 email_sent = 60
 
+[auth]
+additional_redirect_urls = ["https://sls.keth.website/**", "http://localhost:5173/**", "http://127.0.0.1:5173/**"]
+site_url = "https://sls.keth.website"
+
+[auth.email]
+enable_confirmations = true
+max_frequency = "30s"
+otp_length = 8
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
 # sync auth = license token (GPOS-…), not a Supabase JWT — platform must not reject it.
 [functions.sync]
 verify_jwt = false
@@ -14,3 +27,14 @@ verify_jwt = false
 # updates-check is a public GET (desktop has no Supabase session) — rate-limited in-fn.
 [functions.updates-check]
 verify_jwt = false
+
+[db.pooler]
+default_pool_size = 15
+max_client_conn = 200
+
+[storage.analytics]
+enabled = true
+max_namespaces = 10
+
+[storage.image_transformation]
+enabled = true

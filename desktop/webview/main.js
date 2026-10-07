@@ -85,7 +85,7 @@ document.getElementById("hdr-unlock")?.addEventListener("click", async () => {
     return;
   }
   try {
-    await invoke("hw_manual_override", { operator: "Kiosk Staff", durationMs: 3000 });
+    await invoke("hw_manual_override", { operator: "Kiosk Staff", duration_ms: 3000 });
     setBadge("hdr-hw", "unlocked — maglock pulsed", "good");
   } catch (e) {
     // Never swallow: a gate that greets but doesn't open looks "fine" until class starts.

@@ -18,3 +18,7 @@ supabase.txt
 *.sqlite*
 *.db
 bin/
+.hormachuelos/
+hardware/build/
+hardware/build_*/
+hardware/blink_test/

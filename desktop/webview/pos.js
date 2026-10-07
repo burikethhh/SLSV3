@@ -95,6 +95,7 @@ function changeQty(id, delta) {
 }
 
 let selectedMethod = "cash";
+let cashTenderedVal = null;
 
 function renderCart() {
   const el = document.getElementById("pos-cart");
@@ -138,13 +139,47 @@ function renderCart() {
       </button>
     </div>`;
 
+  let cashTenderedCents = total;
+  if (cashTenderedVal !== null) {
+    const parsed = Math.round(Number(cashTenderedVal) * 100);
+    cashTenderedCents = isNaN(parsed) ? 0 : parsed;
+  }
+  const isCash = selectedMethod === "cash";
+  const changeDueCents = isCash ? cashTenderedCents - total : 0;
+  const isInsufficient = isCash && lines.length > 0 && cashTenderedCents < total;
+
+  let cashBoxHtml = "";
+  if (isCash && lines.length > 0) {
+    const quickBills = [50, 100, 200, 500, 1000].filter((b) => b * 100 >= total).slice(0, 4);
+    cashBoxHtml = `
+      <div class="pos-cash-box">
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:600">
+          <span>Cash Tendered</span>
+          <span style="color:#94a3b8">Total: ${cents(total)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+          <span style="font-weight:700;color:var(--cyan);font-size:16px">₱</span>
+          <input id="pos-cash-input" type="number" step="any" min="0" value="${cashTenderedVal !== null ? cashTenderedVal : (total > 0 ? (total / 100).toFixed(2) : '')}" style="flex:1;padding:6px 10px;font-size:15px;font-weight:700;color:#fff" placeholder="${(total / 100).toFixed(2)}" />
+        </div>
+        <div class="pos-quick-bills">
+          <button type="button" class="quick-bill-btn" data-bill="exact">Exact (${cents(total)})</button>
+          ${quickBills.map((b) => `<button type="button" class="quick-bill-btn" data-bill="${b}">₱${b}</button>`).join("")}
+        </div>
+        <div class="change-due-row">
+          <span style="color:var(--muted)">Change Due:</span>
+          <span id="pos-change-display" class="change-due-val ${changeDueCents < 0 ? "insufficient" : ""}">${changeDueCents >= 0 ? cents(changeDueCents) : `Short ${cents(-changeDueCents)}`}</span>
+        </div>
+      </div>`;
+  }
+
   el.innerHTML =
     `<div class="cart-title"><span>CURRENT CART</span><span class="muted" style="font-size:12px">${lines.length} items</span></div>` +
     itemsHtml +
     methodsHtml +
+    cashBoxHtml +
     `<div class="row total"><span>Total Due</span><span>${cents(total)}</span></div>` +
     `<div class="cart-actions">` +
-    `<button id="pos-pay" style="flex:1;margin-top:0" ${lines.length === 0 ? "disabled" : ""}>Pay ${selectedMethod.toUpperCase()} (${cents(total)})</button>` +
+    `<button id="pos-pay" style="flex:1;margin-top:0" ${lines.length === 0 || isInsufficient ? "disabled" : ""}>${isInsufficient ? `Insufficient Cash (${cents(total)})` : `Pay ${selectedMethod.toUpperCase()} (${cents(total)})`}</button>` +
     (lines.length ? `<button type="button" id="pos-clear-cart" class="btn-clear-cart" title="Clear all items in cart">Clear</button>` : "") +
     `</div>`;
 
@@ -162,7 +197,46 @@ function renderCart() {
     });
   });
 
+  const cashInput = el.querySelector("#pos-cash-input");
+  if (cashInput) {
+    cashInput.addEventListener("input", (e) => {
+      cashTenderedVal = e.target.value;
+      const parsed = Math.round(Number(cashTenderedVal) * 100);
+      const tendered = isNaN(parsed) ? 0 : parsed;
+      const diff = tendered - total;
+      const changeEl = document.getElementById("pos-change-display");
+      const payBtn = document.getElementById("pos-pay");
+      if (changeEl) {
+        changeEl.textContent = diff >= 0 ? cents(diff) : `Short ${cents(-diff)}`;
+        changeEl.className = `change-due-val ${diff < 0 ? "insufficient" : ""}`;
+      }
+      if (payBtn) {
+        if (diff < 0) {
+          payBtn.disabled = true;
+          payBtn.textContent = `Insufficient Cash (${cents(total)})`;
+        } else {
+          payBtn.disabled = lines.length === 0;
+          payBtn.textContent = `Pay CASH (${cents(total)})`;
+        }
+      }
+    });
+  }
+
+  el.querySelectorAll(".quick-bill-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const bill = btn.dataset.bill;
+      if (bill === "exact") {
+        cashTenderedVal = (total / 100).toFixed(2);
+      } else {
+        cashTenderedVal = Number(bill).toFixed(2);
+      }
+      renderCart();
+      document.getElementById("pos-cash-input")?.focus();
+    });
+  });
+
   document.getElementById("pos-clear-cart")?.addEventListener("click", () => {
+    cashTenderedVal = null;
     cart.clear();
     renderCart();
   });
@@ -171,8 +245,15 @@ function renderCart() {
     if (!lines.length) return;
     const linesSnapshot = lines.map((l) => ({ ...l }));
     const totalDue = total;
+    const finalTenderedCents = selectedMethod === "cash"
+      ? (cashTenderedVal !== null ? Math.round(Number(cashTenderedVal) * 100) : totalDue)
+      : totalDue;
+    if (selectedMethod === "cash" && finalTenderedCents < totalDue) {
+      alert("Insufficient cash tendered.");
+      return;
+    }
     let totalCents = totalDue;
-    let changeCents = 0;
+    let changeCents = Math.max(0, finalTenderedCents - totalDue);
     const txnId = "SLS-" + Date.now().toString(36).toUpperCase() + "-" + Math.random().toString(36).substring(2, 6).toUpperCase();
 
     if (!invoke) {
@@ -180,11 +261,12 @@ function renderCart() {
       showReceiptModal({
         lines: linesSnapshot,
         totalCents,
-        tenderedCents: totalDue,
-        changeCents: 0,
+        tenderedCents: finalTenderedCents,
+        changeCents,
         method: selectedMethod,
         txnId,
       });
+      cashTenderedVal = null;
       cart.clear();
       renderCart();
       return;
@@ -193,7 +275,7 @@ function renderCart() {
     try {
       const res = await invoke("pos_checkout", {
         lines,
-        tenderedCents: totalDue,
+        tendered_cents: finalTenderedCents,
         method: selectedMethod,
       });
       if (Array.isArray(res)) {
@@ -204,11 +286,12 @@ function renderCart() {
       showReceiptModal({
         lines: linesSnapshot,
         totalCents,
-        tenderedCents: totalDue,
+        tenderedCents: finalTenderedCents,
         changeCents,
         method: selectedMethod,
         txnId,
       });
+      cashTenderedVal = null;
       cart.clear();
       renderCart();
     } catch (e) {

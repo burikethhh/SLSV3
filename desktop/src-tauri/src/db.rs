@@ -36,7 +36,7 @@ pub fn conn() -> &'static Mutex<Connection> {
         c.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, full_name TEXT NOT NULL, embedding_dim SMALLINT NOT NULL DEFAULT 512, face_vector TEXT);
-             CREATE TABLE IF NOT EXISTS attendance_logs(id TEXT PRIMARY KEY, member_id TEXT, confidence REAL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+             CREATE TABLE IF NOT EXISTS attendance_logs(id TEXT PRIMARY KEY, member_id TEXT, direction TEXT NOT NULL DEFAULT 'in', confidence REAL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
              CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY, name TEXT NOT NULL, price_cents BIGINT NOT NULL, stock INTEGER NOT NULL DEFAULT 0);
              CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
              CREATE TABLE IF NOT EXISTS sales(id TEXT PRIMARY KEY, items_json TEXT NOT NULL, total_cents BIGINT NOT NULL, pay_method TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
@@ -48,6 +48,7 @@ pub fn conn() -> &'static Mutex<Connection> {
              CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(created_at);",
         )
         .expect("migrate");
+        let _ = c.execute("ALTER TABLE attendance_logs ADD COLUMN direction TEXT NOT NULL DEFAULT 'in'", []);
         Mutex::new(c)
     })
 }
@@ -86,21 +87,40 @@ pub fn enqueue_member(member_id: &str, full_name: &str, vector: &[f32]) -> rusql
     Ok(())
 }
 
-/// Gate-IN log with 3s per-member anti-passback cooldown.
+/// Check if a member is currently inside (latest record direction == 'in')
+pub fn is_member_inside(member_id: &str) -> rusqlite::Result<bool> {
+    let db = conn().lock().unwrap();
+    let dir: rusqlite::Result<String> = db.query_row(
+        "SELECT direction FROM attendance_logs WHERE member_id=?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        params![member_id],
+        |r| r.get(0),
+    );
+    match dir {
+        Ok(d) => Ok(d.eq_ignore_ascii_case("in")),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Gate-IN log with 5s per-member anti-passback cooldown to avoid camera spam.
 pub fn log_checkin(member_id: &str, confidence: f32) -> rusqlite::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let db = conn().lock().unwrap();
-    // Cooldown: reject if same member checked in within last 3s.
-    let recent: i64 = db.query_row(
-        "SELECT COUNT(*) FROM attendance_logs WHERE member_id=?1 AND created_at > datetime('now','-3 seconds')",
-        params![member_id],
-        |r| r.get(0),
-    )?;
-    if recent > 0 {
-        return Ok("cooldown".into());
+
+    // Cooldown: reject if same member checked in within last 5s to avoid duplicate scan spam.
+    if member_id != "MANUAL_OVERRIDE" {
+        let recent: i64 = db.query_row(
+            "SELECT COUNT(*) FROM attendance_logs WHERE member_id=?1 AND coalesce(direction,'in')='in' AND created_at > datetime('now','-5 seconds')",
+            params![member_id],
+            |r| r.get(0),
+        )?;
+        if recent > 0 {
+            return Ok("cooldown".into());
+        }
     }
+
     db.execute(
-        "INSERT INTO attendance_logs(id, member_id, confidence) VALUES(?1,?2,?3)",
+        "INSERT INTO attendance_logs(id, member_id, direction, confidence) VALUES(?1,?2,'in',?3)",
         params![id, member_id, confidence],
     )?;
     let created_at: String = db
@@ -114,6 +134,7 @@ pub fn log_checkin(member_id: &str, confidence: f32) -> rusqlite::Result<String>
     let payload = serde_json::json!({
         "id": id,
         "member_id": member_id,
+        "direction": "in",
         "confidence": confidence,
         "created_at": created_at,
     })
@@ -126,11 +147,75 @@ pub fn log_checkin(member_id: &str, confidence: f32) -> rusqlite::Result<String>
     Ok(id)
 }
 
+/// Gate-OUT log: marks member as checked out, unlocking subsequent checkin.
+pub fn log_checkout(member_id: &str) -> rusqlite::Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let db = conn().lock().unwrap();
+    db.execute(
+        "INSERT INTO attendance_logs(id, member_id, direction, confidence) VALUES(?1,?2,'out',1.0)",
+        params![id, member_id],
+    )?;
+    let created_at: String = db
+        .query_row(
+            "SELECT created_at FROM attendance_logs WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
+    let payload = serde_json::json!({
+        "id": id,
+        "member_id": member_id,
+        "direction": "out",
+        "confidence": 1.0,
+        "created_at": created_at,
+    })
+    .to_string();
+    db.execute(
+        "INSERT INTO outbox(id, op, payload) VALUES(?1,'attendance',?2)
+         ON CONFLICT(id) DO NOTHING",
+        params![id, payload],
+    )?;
+    Ok(id)
+}
+
+/// Gate exit button press: logs anonymous exit with current timestamp.
+pub fn log_exit_button() -> rusqlite::Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let db = conn().lock().unwrap();
+    db.execute(
+        "INSERT INTO attendance_logs(id, member_id, direction, confidence) VALUES(?1, 'EXIT_BUTTON', 'out', 1.0)",
+        params![id],
+    )?;
+    let created_at: String = db
+        .query_row(
+            "SELECT created_at FROM attendance_logs WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
+    let payload = serde_json::json!({
+        "id": id,
+        "member_id": "EXIT_BUTTON",
+        "direction": "out",
+        "confidence": 1.0,
+        "created_at": created_at,
+    })
+    .to_string();
+    let _ = db.execute(
+        "INSERT INTO outbox(id, op, payload) VALUES(?1,'attendance',?2)
+         ON CONFLICT(id) DO NOTHING",
+        params![id, payload],
+    );
+    Ok(id)
+}
+
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct AttendanceRow {
     pub id: String,
     pub member_id: String,
     pub full_name: String,
+    pub direction: String,
+    pub is_inside: bool,
     pub confidence: f32,
     pub created_at: String,
     pub visits_today: u32,
@@ -156,7 +241,7 @@ pub fn log_manual_override(operator: Option<&str>) -> rusqlite::Result<String> {
     let db = conn().lock().unwrap();
     let op_name = operator.unwrap_or("Staff Manual Override");
     db.execute(
-        "INSERT INTO attendance_logs(id, member_id, confidence) VALUES(?1, 'MANUAL_OVERRIDE', 1.0)",
+        "INSERT INTO attendance_logs(id, member_id, direction, confidence) VALUES(?1, 'MANUAL_OVERRIDE', 'in', 1.0)",
         params![id],
     )?;
     let created_at: String = db
@@ -190,28 +275,39 @@ pub fn attendance_list(limit: u32) -> rusqlite::Result<Vec<AttendanceRow>> {
         "SELECT a.id, a.member_id, 
                 CASE 
                     WHEN a.member_id = 'MANUAL_OVERRIDE' THEN 'MANUAL GATE OVERRIDE'
+                    WHEN a.member_id = 'EXIT_BUTTON' THEN 'EXIT (BUTTON)'
                     ELSE coalesce(m.full_name, 'Hunter ' || substr(a.member_id, 1, 8))
                 END, 
                 a.confidence, a.created_at,
                 CASE 
-                    WHEN a.member_id = 'MANUAL_OVERRIDE' THEN 1
+                    WHEN a.member_id IN ('MANUAL_OVERRIDE', 'EXIT_BUTTON') THEN 1
                     ELSE (
                         SELECT count(*) 
                         FROM attendance_logs al 
                         WHERE al.member_id = a.member_id 
                           AND date(al.created_at) = date(a.created_at)
                           AND al.created_at <= a.created_at
+                          AND coalesce(al.direction, 'in') = 'in'
                     )
                 END as visits_today,
                 CASE 
-                    WHEN a.member_id = 'MANUAL_OVERRIDE' THEN 1
+                    WHEN a.member_id IN ('MANUAL_OVERRIDE', 'EXIT_BUTTON') THEN 1
                     ELSE (
                         SELECT count(*) 
                         FROM attendance_logs al 
                         WHERE al.member_id = a.member_id 
                           AND al.created_at <= a.created_at
+                          AND coalesce(al.direction, 'in') = 'in'
                     )
-                END as total_visits
+                END as total_visits,
+                coalesce(a.direction, 'in') as direction,
+                (
+                    SELECT al2.direction 
+                    FROM attendance_logs al2 
+                    WHERE al2.member_id = a.member_id 
+                    ORDER BY al2.created_at DESC, al2.rowid DESC 
+                    LIMIT 1
+                ) as latest_direction
          FROM attendance_logs a
          LEFT JOIN members m ON m.id = a.member_id
          ORDER BY a.created_at DESC
@@ -222,8 +318,17 @@ pub fn attendance_list(limit: u32) -> rusqlite::Result<Vec<AttendanceRow>> {
             let member_id: String = r.get(1)?;
             let visits_today: u32 = r.get(5)?;
             let total_visits: u32 = r.get(6)?;
+            let direction: String = r.get(7)?;
+            let latest_direction: Option<String> = r.get(8)?;
+            let is_inside = if member_id == "MANUAL_OVERRIDE" || member_id == "EXIT_BUTTON" {
+                false
+            } else {
+                latest_direction.as_deref().unwrap_or("in").eq_ignore_ascii_case("in")
+            };
             let rank = if member_id == "MANUAL_OVERRIDE" {
                 "OVERRIDE".to_string()
+            } else if member_id == "EXIT_BUTTON" {
+                "EXIT".to_string()
             } else {
                 calculate_hunter_rank(total_visits).to_string()
             };
@@ -231,6 +336,8 @@ pub fn attendance_list(limit: u32) -> rusqlite::Result<Vec<AttendanceRow>> {
                 id: r.get(0)?,
                 member_id,
                 full_name: r.get(2)?,
+                direction,
+                is_inside,
                 confidence: r.get(3)?,
                 created_at: r.get(4)?,
                 visits_today,
@@ -566,8 +673,20 @@ fn row_product(r: &rusqlite::Row) -> rusqlite::Result<ProductRow> {
 pub fn member_search(q: &str) -> rusqlite::Result<Vec<MemberRow>> {
     let db = conn().lock().unwrap();
     let like = format!("%{}%", q.trim());
-    let mut st = db.prepare("SELECT id, full_name FROM members WHERE full_name LIKE ?1 OR id LIKE ?1 ORDER BY full_name LIMIT 20")?;
-    let rows = st.query_map(params![like], |r| Ok(MemberRow { id: r.get(0)?, full_name: r.get(1)? }))?
+    let mut st = db.prepare(
+        "SELECT m.id, m.full_name,
+                (SELECT al.direction FROM attendance_logs al WHERE al.member_id = m.id ORDER BY al.created_at DESC, al.rowid DESC LIMIT 1) as latest_dir
+         FROM members m 
+         WHERE m.full_name LIKE ?1 OR m.id LIKE ?1 
+         ORDER BY m.full_name 
+         LIMIT 20",
+    )?;
+    let rows = st
+        .query_map(params![like], |r| {
+            let latest_dir: Option<String> = r.get(2)?;
+            let is_inside = latest_dir.as_deref().unwrap_or("out").eq_ignore_ascii_case("in");
+            Ok(MemberRow { id: r.get(0)?, full_name: r.get(1)?, is_inside })
+        })?
         .collect();
     rows
 }
@@ -576,6 +695,7 @@ pub fn member_search(q: &str) -> rusqlite::Result<Vec<MemberRow>> {
 pub struct MemberRow {
     pub id: String,
     pub full_name: String,
+    pub is_inside: bool,
 }
 
 /// Recent sales for the POS history pane (local-first; cloud rows land via sync pull).
@@ -667,6 +787,29 @@ mod tests {
         assert_eq!(v["member_id"].as_str(), Some(member.as_str()));
         assert!(v["created_at"].as_str().unwrap_or("").len() >= 19);
         clear_outbox(&[att_id]).unwrap();
+    }
+
+    #[test]
+    fn checkin_rate_limited_and_exit_button_logged() {
+        setup();
+        let member = uuid::Uuid::new_v4().to_string();
+        let att_id1 = log_checkin(&member, 0.95).expect("first checkin");
+        assert_ne!(att_id1, "cooldown");
+
+        // Attempting to check in again within 5s returns cooldown to avoid camera spam
+        let att_id2 = log_checkin(&member, 0.95).expect("second checkin");
+        assert_eq!(att_id2, "cooldown");
+
+        // Button out logs anonymous checkout with timestamp
+        let exit_id = log_exit_button().expect("exit button");
+        let item = outbox_row(&exit_id).expect("exit outbox row");
+        assert_eq!(item.op, "attendance");
+        let v: serde_json::Value = serde_json::from_str(&item.payload).unwrap();
+        assert_eq!(v["member_id"].as_str(), Some("EXIT_BUTTON"));
+        assert_eq!(v["direction"].as_str(), Some("out"));
+        assert!(v["created_at"].as_str().unwrap_or("").len() >= 19);
+
+        clear_outbox(&[att_id1, exit_id]).unwrap();
     }
 
     #[test]

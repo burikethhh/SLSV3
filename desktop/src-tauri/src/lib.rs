@@ -17,7 +17,7 @@ use sls_core::pos::{checkout, CartLine, PayMethod};
 use std::sync::{Arc, OnceLock};
 use tauri::Manager;
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn pos_checkout(lines: Vec<CartLineDto>, tendered_cents: i64, method: String) -> Result<(i64, i64), String> {
     let pay = match method.as_str() {
         "card" => PayMethod::Card,
@@ -50,10 +50,35 @@ struct CartLineDto {
     discount_cents: i64,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn gate_checkin(member_id: String, confidence: f32) -> Result<String, String> {
-    // Single-camera IN only. Cooldown + SQLite insert handled in db.rs.
     db::log_checkin(&member_id, confidence).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn gate_checkout(member_id: String) -> Result<String, String> {
+    db::log_checkout(&member_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn gate_exit_button() -> Result<String, String> {
+    #[cfg(feature = "hardware-serial")]
+    {
+        let _ = hw().unlock_door(3000);
+    }
+    db::log_exit_button().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn hw_poll_buttons() -> Result<Vec<hw_serial::HardwareButtonEvent>, String> {
+    #[cfg(feature = "hardware-serial")]
+    {
+        Ok(hw().drain_button_events())
+    }
+    #[cfg(not(feature = "hardware-serial"))]
+    {
+        Ok(vec![])
+    }
 }
 
 #[tauri::command]
@@ -64,7 +89,7 @@ fn attendance_list(limit: Option<u32>) -> Result<Vec<db::AttendanceRow>, String>
 // ── Face pipeline: canvas frame → YuNet+EdgeFace → match FaceStore ────────────
 
 #[cfg(feature = "face-ort")]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn gate_scan_frame(data_url: String) -> Result<face_pipeline::GateScan, String> {
     let img = face_pipeline::decode_base64_image(&data_url)?;
     let mut scan = face_pipeline::scan_frame(&img)?;
@@ -84,7 +109,7 @@ fn gate_scan_frame(data_url: String) -> Result<face_pipeline::GateScan, String> 
 }
 
 #[cfg(not(feature = "face-ort"))]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn gate_scan_frame(_data_url: String) -> Result<serde_json::Value, String> {
     Err("face-ort feature not enabled in this build".into())
 }
@@ -115,7 +140,7 @@ fn sync_pending() -> Result<u32, String> {
 
 // ── Face enroll/match (camera pipeline feeds embeddings; store is always on) ──
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn face_enroll(member_id: String, full_name: String, embedding: Vec<f32>) -> Result<String, String> {
     // v3 FaceStore is EdgeFace 512-d only (legacy 128-d rows are skipped on load).
     if embedding.len() != 512 {
@@ -157,7 +182,7 @@ fn face_store() -> &'static parking_lot::RwLock<FaceStore> {
 
 // ── Apply a license key: fail-closed verify → cache → start sync worker ───────
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn license_apply(token: String, supabase_url: Option<String>) -> Result<String, String> {
     let mgr = license_mgr();
     let status = mgr.verify_and_apply(&token)?;
@@ -379,7 +404,7 @@ fn license_mgr() -> Arc<license_verify::LicenseManager> {
 
 // ── Hardware — stubs without `hardware-serial` so generate_handler stays static ─
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn hw_manual_override(operator: Option<String>, duration_ms: Option<u32>) -> Result<String, String> {
     let op = operator.as_deref().unwrap_or("Kiosk Staff Button");
     let _ = db::log_manual_override(Some(op));
@@ -395,13 +420,13 @@ fn hw_manual_override(operator: Option<String>, duration_ms: Option<u32>) -> Res
 }
 
 #[cfg(feature = "hardware-serial")]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn hw_unlock(duration_ms: Option<u32>) -> Result<String, String> {
     hw().unlock_door(duration_ms.unwrap_or(3000))
 }
 
 #[cfg(not(feature = "hardware-serial"))]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn hw_unlock(_duration_ms: Option<u32>) -> Result<String, String> {
     Ok("unlocked (no hardware-serial)".into())
 }
@@ -496,6 +521,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pos_checkout,
             gate_checkin,
+            gate_checkout,
+            gate_exit_button,
+            hw_poll_buttons,
             attendance_list,
             gate_scan_frame,
             product_search,

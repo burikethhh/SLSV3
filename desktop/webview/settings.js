@@ -159,7 +159,7 @@ async function bindActions() {
     if (!token) { msg.textContent = "Paste a license key first."; return; }
     msg.textContent = "Verifying…";
     try {
-      const result = await invoke("license_apply", { token, supabaseUrl });
+      const result = await invoke("license_apply", { token, supabase_url: supabaseUrl });
       msg.textContent = `Applied: ${result}`;
       msg.style.color = "#3ddc97";
       document.getElementById("set-token").value = "";

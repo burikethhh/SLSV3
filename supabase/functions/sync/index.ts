@@ -148,7 +148,7 @@ serve(async (req) => {
           id,
           gym_id: gymId,
           member_id: asUuid(a.member_id),
-          direction: "in",
+          direction: (typeof a.direction === "string" && (a.direction === "out" || a.direction === "in")) ? a.direction : "in",
           confidence: a.confidence ?? null,
           created_at: typeof a.created_at === "string" && a.created_at ? a.created_at : new Date().toISOString(),
         },
