@@ -96,31 +96,69 @@ function changeQty(id, delta) {
 
 let selectedMethod = "cash";
 let cashTenderedVal = null;
+let appliedPromo = null; // { code: string, pct_off: number }
+let promoMsg = "";
 
 function renderCart() {
   const el = document.getElementById("pos-cart");
   if (!el) return;
-  const lines = [...cart.entries()].map(([id, l]) => ({ product_id: id, ...l, discount_cents: 0 }));
-  const total = lines.reduce((a, l) => a + l.unit_cents * l.qty - l.discount_cents, 0);
+  const rawLines = [...cart.entries()].map(([id, l]) => ({ product_id: id, ...l, discount_cents: 0 }));
+  const subtotal = rawLines.reduce((a, l) => a + l.unit_cents * l.qty, 0);
+  const discountPct = appliedPromo ? Math.min(100, Math.max(0, appliedPromo.pct_off)) : 0;
+
+  let totalDiscount = 0;
+  const lines = rawLines.map((l) => {
+    const gross = l.unit_cents * l.qty;
+    const off = discountPct > 0 ? Math.min(gross, Math.round((gross * discountPct) / 100)) : 0;
+    totalDiscount += off;
+    return { ...l, discount_cents: off };
+  });
+  const total = Math.max(0, subtotal - totalDiscount);
 
   const itemsHtml = lines.length
     ? `<div class="cart-items">` +
       lines
         .map(
-          (l) =>
-            `<div class="cart-row">` +
-            `<div><div class="cart-item-name">${esc(l.name)}</div><div class="cart-item-unit">${cents(l.unit_cents)} ea</div></div>` +
-            `<div class="cart-qty-ctrl">` +
-            `<button type="button" class="qty-btn" data-action="dec" data-id="${l.product_id}">−</button>` +
-            `<span class="qty-val">${l.qty}</span>` +
-            `<button type="button" class="qty-btn" data-action="inc" data-id="${l.product_id}">+</button>` +
-            `</div>` +
-            `<span class="cart-price">${cents(l.unit_cents * l.qty)}</span>` +
-            `</div>`,
+          (l) => {
+            const lineGross = l.unit_cents * l.qty;
+            const lineNet = lineGross - l.discount_cents;
+            const discTag = l.discount_cents > 0 ? `<span style="font-size:11px;color:#34d399;margin-left:4px">(-${cents(l.discount_cents)})</span>` : "";
+            return (
+              `<div class="cart-row">` +
+              `<div><div class="cart-item-name">${esc(l.name)}</div><div class="cart-item-unit">${cents(l.unit_cents)} ea</div></div>` +
+              `<div class="cart-qty-ctrl">` +
+              `<button type="button" class="qty-btn" data-action="dec" data-id="${l.product_id}">−</button>` +
+              `<span class="qty-val">${l.qty}</span>` +
+              `<button type="button" class="qty-btn" data-action="inc" data-id="${l.product_id}">+</button>` +
+              `</div>` +
+              `<span class="cart-price">${cents(lineNet)}${discTag}</span>` +
+              `</div>`
+            );
+          },
         )
         .join("") +
       `</div>`
     : `<p class="muted">Cart empty — tap a product to add.</p>`;
+
+  const promoHtml = lines.length ? `
+    <div class="pos-promo-box" style="margin-top:10px;padding:8px 10px;background:rgba(15,23,42,0.65);border-radius:6px;border:1px solid rgba(139,92,246,0.3)">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:600">
+        <span>Promo Voucher</span>
+        ${appliedPromo ? `<span style="color:#34d399;font-weight:700">${appliedPromo.pct_off}% OFF ACTIVE</span>` : `<span style="color:#94a3b8">Optional</span>`}
+      </div>
+      ${appliedPromo ? `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+          <span style="font-weight:700;color:var(--cyan);font-family:monospace;font-size:13px">${esc(appliedPromo.code)} (${appliedPromo.pct_off}% off)</span>
+          <button type="button" id="pos-remove-promo" style="padding:3px 8px;font-size:11px;background:rgba(239,68,68,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.4);border-radius:4px;cursor:pointer">Remove</button>
+        </div>
+      ` : `
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <input id="pos-promo-input" placeholder="e.g. VIP20" style="flex:1;padding:4px 8px;font-size:12px;text-transform:uppercase;font-weight:700" />
+          <button type="button" id="pos-apply-promo" style="padding:4px 12px;font-size:12px;cursor:pointer">Apply</button>
+        </div>
+      `}
+      ${promoMsg ? `<div style="font-size:11px;margin-top:4px;color:${appliedPromo ? '#34d399' : '#f87171'}">${esc(promoMsg)}</div>` : ''}
+    </div>` : '';
 
   const methodsHtml = `
     <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-top:10px">Payment Tender</div>
@@ -172,11 +210,18 @@ function renderCart() {
       </div>`;
   }
 
+  const breakdownHtml = totalDiscount > 0 ? `
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:10px"><span>Subtotal:</span><span>${cents(subtotal)}</span></div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:#34d399;margin-top:2px"><span>Discount (${appliedPromo.pct_off}%):</span><span>-${cents(totalDiscount)}</span></div>
+  ` : "";
+
   el.innerHTML =
     `<div class="cart-title"><span>CURRENT CART</span><span class="muted" style="font-size:12px">${lines.length} items</span></div>` +
     itemsHtml +
+    promoHtml +
     methodsHtml +
     cashBoxHtml +
+    breakdownHtml +
     `<div class="row total"><span>Total Due</span><span>${cents(total)}</span></div>` +
     `<div class="cart-actions">` +
     `<button id="pos-pay" style="flex:1;margin-top:0" ${lines.length === 0 || isInsufficient ? "disabled" : ""}>${isInsufficient ? `Insufficient Cash (${cents(total)})` : `Pay ${selectedMethod.toUpperCase()} (${cents(total)})`}</button>` +
@@ -222,6 +267,46 @@ function renderCart() {
     });
   }
 
+  const promoInput = el.querySelector("#pos-promo-input");
+  const applyPromoBtn = el.querySelector("#pos-apply-promo");
+  const removePromoBtn = el.querySelector("#pos-remove-promo");
+
+  if (applyPromoBtn && promoInput) {
+    const handleApply = async () => {
+      const code = (promoInput.value || "").trim().toUpperCase();
+      if (!code) return;
+      try {
+        let pct = null;
+        if (invoke) {
+          pct = await invoke("pos_validate_promo", { code });
+        } else {
+          pct = code === "VIP20" ? 20.0 : code === "PROMO10" ? 10.0 : null;
+        }
+        if (pct !== null && pct > 0) {
+          appliedPromo = { code, pct_off: pct };
+          promoMsg = `Applied ${pct}% discount (${code})`;
+        } else {
+          promoMsg = `Invalid or inactive voucher "${code}"`;
+        }
+      } catch (err) {
+        promoMsg = String(err);
+      }
+      renderCart();
+    };
+    applyPromoBtn.addEventListener("click", handleApply);
+    promoInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleApply();
+    });
+  }
+
+  if (removePromoBtn) {
+    removePromoBtn.addEventListener("click", () => {
+      appliedPromo = null;
+      promoMsg = "";
+      renderCart();
+    });
+  }
+
   el.querySelectorAll(".quick-bill-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const bill = btn.dataset.bill;
@@ -237,6 +322,8 @@ function renderCart() {
 
   document.getElementById("pos-clear-cart")?.addEventListener("click", () => {
     cashTenderedVal = null;
+    appliedPromo = null;
+    promoMsg = "";
     cart.clear();
     renderCart();
   });
@@ -255,6 +342,7 @@ function renderCart() {
     let totalCents = totalDue;
     let changeCents = Math.max(0, finalTenderedCents - totalDue);
     const txnId = "SLS-" + Date.now().toString(36).toUpperCase() + "-" + Math.random().toString(36).substring(2, 6).toUpperCase();
+    const promoSnapshot = appliedPromo ? { ...appliedPromo } : null;
 
     if (!invoke) {
       playSaleSuccessChime();
@@ -265,8 +353,12 @@ function renderCart() {
         changeCents,
         method: selectedMethod,
         txnId,
+        promo: promoSnapshot,
+        subtotalCents: subtotal,
       });
       cashTenderedVal = null;
+      appliedPromo = null;
+      promoMsg = "";
       cart.clear();
       renderCart();
       return;
@@ -290,8 +382,12 @@ function renderCart() {
         changeCents,
         method: selectedMethod,
         txnId,
+        promo: promoSnapshot,
+        subtotalCents: subtotal,
       });
       cashTenderedVal = null;
+      appliedPromo = null;
+      promoMsg = "";
       cart.clear();
       renderCart();
     } catch (e) {
@@ -337,7 +433,7 @@ function setupReceiptModal() {
   });
 }
 
-function showReceiptModal({ lines, totalCents, tenderedCents, changeCents, method, txnId }) {
+function showReceiptModal({ lines, totalCents, tenderedCents, changeCents, method, txnId, promo, subtotalCents }) {
   const modal = document.getElementById("pos-receipt-modal");
   const paper = document.getElementById("pos-receipt-paper");
   if (!modal || !paper) return;
@@ -346,22 +442,31 @@ function showReceiptModal({ lines, totalCents, tenderedCents, changeCents, metho
   const dateStr = now.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
   const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
+  const grossSubtotal = subtotalCents || totalCents;
+  const discountAmt = Math.max(0, grossSubtotal - totalCents);
   const vatAmt = Math.round(totalCents - totalCents / 1.12);
 
   const itemRowsHtml = lines
     .map((l) => {
-      const lineTotal = l.unit_cents * l.qty - (l.discount_cents || 0);
+      const lineGross = l.unit_cents * l.qty;
+      const lineTotal = lineGross - (l.discount_cents || 0);
+      const discNote = l.discount_cents > 0 ? `<div style="font-size:9px;color:#059669">Disc -${cents(l.discount_cents)}</div>` : "";
       return (
         `<div class="receipt-item-row">` +
         `<div class="receipt-item-desc">` +
         `<div>${esc(l.name)}</div>` +
         `<div style="font-size:10px;color:#64748b">${l.qty} × ${cents(l.unit_cents)}</div>` +
+        discNote +
         `</div>` +
         `<div class="receipt-item-amt">${cents(lineTotal)}</div>` +
         `</div>`
       );
     })
     .join("");
+
+  const discountHtml = promo && discountAmt > 0
+    ? `<div class="receipt-meta-row" style="color:#059669"><span>VOUCHER (${esc(promo.code)} · ${promo.pct_off}%)</span><span>-${cents(discountAmt)}</span></div>`
+    : "";
 
   paper.innerHTML = `
     <div class="receipt-brand-title">SOLO LEVELING SYSTEM</div>
@@ -377,7 +482,8 @@ function showReceiptModal({ lines, totalCents, tenderedCents, changeCents, metho
     </div>
     ${itemRowsHtml}
     <div class="receipt-divider"></div>
-    <div class="receipt-meta-row"><span>SUBTOTAL</span><span>${cents(totalCents)}</span></div>
+    <div class="receipt-meta-row"><span>SUBTOTAL</span><span>${cents(grossSubtotal)}</span></div>
+    ${discountHtml}
     <div class="receipt-meta-row"><span>VAT (12% INCLUDED)</span><span>${cents(vatAmt)}</span></div>
     <div class="receipt-total-row"><span>TOTAL AMOUNT DUE</span><span>${cents(totalCents)}</span></div>
     <div class="receipt-tender-row"><span>TENDERED (${method.toUpperCase()})</span><span>${cents(tenderedCents)}</span></div>

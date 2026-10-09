@@ -614,6 +614,21 @@ async function admit(memberId, score, optionalName) {
       result = await invoke("gate_checkin", { member_id: memberId, confidence: score });
     }
 
+    if (result === "expired") {
+      showHint("MEMBERSHIP EXPIRED — Renew at front desk", "#ff6b6b");
+      playChime("deny");
+      return;
+    }
+    if (result === "frozen") {
+      showHint("MEMBERSHIP FROZEN — Inquire with gym staff", "#ffd166");
+      playChime("deny");
+      return;
+    }
+    if (result === "cancelled") {
+      showHint("MEMBERSHIP CANCELLED — Access Denied", "#ff6b6b");
+      playChime("deny");
+      return;
+    }
     if (result === "cooldown") {
       showHint("Already checked in — 5s Anti-Passback", "#ffd166");
       playChime("deny");

@@ -261,6 +261,19 @@ async function list() {
             .map((r, idx) => {
               const rank = r.rank || (idx === 0 ? "S" : idx === 1 ? "A" : idx === 2 ? "B" : idx === 3 ? "D" : "C");
               const rankBadgeCls = rank === "S" ? "badge-ultra" : rank === "A" ? "badge-pro" : rank === "B" ? "badge-rank-b" : rank === "C" ? "badge-rank-c" : rank === "D" ? "badge-rank-d" : "badge-rank-e";
+              const isFrozen = (r.status || "").toLowerCase() === "frozen";
+              const isCancelled = (r.status || "").toLowerCase() === "cancelled";
+              const isExpired = r.expires_at && !isNaN(Date.parse(r.expires_at)) && new Date(r.expires_at) < new Date();
+              let statusBadge = `<span class="badge good"><span class="dot live"></span> Active · 512-d Vector</span>`;
+              if (isFrozen) {
+                statusBadge = `<span class="badge" style="background:rgba(234,179,8,0.2);color:#fbbf24;border:1px solid rgba(234,179,8,0.35)"><span class="dot" style="background:#fbbf24"></span> Frozen</span>`;
+              } else if (isCancelled) {
+                statusBadge = `<span class="badge" style="background:rgba(239,68,68,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.35)"><span class="dot" style="background:#f87171"></span> Cancelled</span>`;
+              } else if (isExpired) {
+                const expDate = new Date(r.expires_at).toLocaleDateString();
+                statusBadge = `<span class="badge" style="background:rgba(239,68,68,0.2);color:#f87171;border:1px solid rgba(239,68,68,0.35)"><span class="dot" style="background:#f87171"></span> Expired (${expDate})</span>`;
+              }
+
               return `
                 <tr>
                   <td style="font-weight:600;color:#fff">${esc(r.full_name)}</td>
@@ -273,7 +286,7 @@ async function list() {
                       </button>
                     </div>
                   </td>
-                  <td><span class="badge good"><span class="dot live"></span> Active · 512-d Vector</span></td>
+                  <td>${statusBadge}</td>
                 </tr>`;
             })
             .join("")}

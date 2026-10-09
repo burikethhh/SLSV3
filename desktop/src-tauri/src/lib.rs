@@ -131,6 +131,11 @@ fn sale_list(limit: Option<u32>) -> Result<Vec<db::SaleRow>, String> {
     db::sale_list(limit.unwrap_or(50)).map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+fn pos_validate_promo(code: String) -> Result<Option<f64>, String> {
+    db::validate_promo(&code).map_err(|e| e.to_string())
+}
+
 /// Outbox depth for the status bar ("3 pending sync") — COUNT only, never
 /// pulls payloads (face vectors are huge, status polls often).
 #[tauri::command]
@@ -529,6 +534,7 @@ pub fn run() {
             product_search,
             member_search,
             sale_list,
+            pos_validate_promo,
             sync_pending,
             face_enroll,
             face_match,

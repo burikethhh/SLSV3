@@ -172,6 +172,34 @@ mod inner {
                                         let _ = db::reconcile_staff(&present);
                                     }
                                 }
+                                // Promos cache + reconcile.
+                                if let Some(rows) = body.get("promos").and_then(|p| p.as_array()) {
+                                    let mut present: Vec<String> = Vec::new();
+                                    for r in rows {
+                                        let o = r.as_object();
+                                        let (Some(code), Some(pct_off)) = (
+                                            o.and_then(|x| x.get("code")).and_then(|v| v.as_str()),
+                                            o.and_then(|x| x.get("pct_off")).and_then(|v| v.as_f64()),
+                                        ) else { continue };
+                                        let active = o.and_then(|x| x.get("active")).and_then(|v| v.as_bool()).unwrap_or(true);
+                                        let _ = db::upsert_promo(code, pct_off, active);
+                                        if active {
+                                            present.push(code.to_string());
+                                        }
+                                    }
+                                    let _ = db::reconcile_promos(&present);
+                                }
+                                // Member lifecycle pull (status + expires_at).
+                                if let Some(rows) = body.get("members").and_then(|m| m.as_array()) {
+                                    for r in rows {
+                                        let o = r.as_object();
+                                        let Some(id) = o.and_then(|x| x.get("id")).and_then(|v| v.as_str()) else { continue };
+                                        let full_name = o.and_then(|x| x.get("full_name")).and_then(|v| v.as_str()).unwrap_or("Unknown");
+                                        let status = o.and_then(|x| x.get("status")).and_then(|v| v.as_str()).unwrap_or("active");
+                                        let expires_at = o.and_then(|x| x.get("expires_at")).and_then(|v| v.as_str());
+                                        let _ = db::upsert_member_cloud(id, full_name, status, expires_at);
+                                    }
+                                }
                             } else {
                                 failures = failures.saturating_add(1);
                                 let ids: Vec<String> = batch.iter().map(|b| b.id.clone()).collect();

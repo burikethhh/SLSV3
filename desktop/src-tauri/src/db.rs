@@ -44,11 +44,14 @@ pub fn conn() -> &'static Mutex<Connection> {
              CREATE TABLE IF NOT EXISTS license_cache(token TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS staff_cache(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, pin_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'staff', active INTEGER NOT NULL DEFAULT 1);
+             CREATE TABLE IF NOT EXISTS promos_cache(code TEXT PRIMARY KEY COLLATE NOCASE, pct_off REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1);
              CREATE INDEX IF NOT EXISTS idx_attendance_member_created ON attendance_logs(member_id, created_at);
              CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(created_at);",
         )
         .expect("migrate");
         let _ = c.execute("ALTER TABLE attendance_logs ADD COLUMN direction TEXT NOT NULL DEFAULT 'in'", []);
+        let _ = c.execute("ALTER TABLE members ADD COLUMN status TEXT NOT NULL DEFAULT 'active'", []);
+        let _ = c.execute("ALTER TABLE members ADD COLUMN expires_at TEXT", []);
         Mutex::new(c)
     })
 }
@@ -87,6 +90,58 @@ pub fn enqueue_member(member_id: &str, full_name: &str, vector: &[f32]) -> rusql
     Ok(())
 }
 
+/// Upsert member details pulled from cloud (preserves local face_vector and dim).
+pub fn upsert_member_cloud(id: &str, full_name: &str, status: &str, expires_at: Option<&str>) -> rusqlite::Result<()> {
+    let db = conn().lock().unwrap();
+    db.execute(
+        "INSERT INTO members(id, full_name, status, expires_at) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+           full_name = excluded.full_name,
+           status = excluded.status,
+           expires_at = excluded.expires_at",
+        params![id, full_name, status, expires_at],
+    )?;
+    Ok(())
+}
+
+/// Check member lifecycle status (frozen, cancelled, or expired) before admitting.
+pub fn check_member_lifecycle(member_id: &str) -> rusqlite::Result<Result<(), String>> {
+    let db = conn().lock().unwrap();
+    let row: rusqlite::Result<(String, Option<String>)> = db.query_row(
+        "SELECT coalesce(status, 'active'), expires_at FROM members WHERE id=?1",
+        params![member_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    );
+    match row {
+        Ok((status, expires_at)) => {
+            if status.eq_ignore_ascii_case("frozen") {
+                return Ok(Err("frozen".into()));
+            }
+            if status.eq_ignore_ascii_case("cancelled") {
+                return Ok(Err("cancelled".into()));
+            }
+            if let Some(exp_str) = expires_at {
+                if let Ok(exp_dt) = chrono::DateTime::parse_from_rfc3339(&exp_str) {
+                    if chrono::Utc::now() > exp_dt {
+                        return Ok(Err("expired".into()));
+                    }
+                } else if let Ok(exp_dt) = chrono::DateTime::parse_from_str(&exp_str, "%Y-%m-%d %H:%M:%S%#z") {
+                    if chrono::Utc::now() > exp_dt {
+                        return Ok(Err("expired".into()));
+                    }
+                } else if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&exp_str, "%Y-%m-%d %H:%M:%S") {
+                    if chrono::Utc::now().naive_utc() > naive {
+                        return Ok(Err("expired".into()));
+                    }
+                }
+            }
+            Ok(Ok(()))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Ok(())),
+        Err(e) => Err(e),
+    }
+}
+
 /// Check if a member is currently inside (latest record direction == 'in')
 pub fn is_member_inside(member_id: &str) -> rusqlite::Result<bool> {
     let db = conn().lock().unwrap();
@@ -105,6 +160,14 @@ pub fn is_member_inside(member_id: &str) -> rusqlite::Result<bool> {
 /// Gate-IN log with 5s per-member anti-passback cooldown to avoid camera spam.
 pub fn log_checkin(member_id: &str, confidence: f32) -> rusqlite::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
+
+    // Member lifecycle guard (skip for manual override)
+    if member_id != "MANUAL_OVERRIDE" && member_id != "EXIT_BUTTON" {
+        if let Ok(Err(reason)) = check_member_lifecycle(member_id) {
+            return Ok(reason);
+        }
+    }
+
     let db = conn().lock().unwrap();
 
     // Cooldown: reject if same member checked in within last 5s to avoid duplicate scan spam.
@@ -675,7 +738,9 @@ pub fn member_search(q: &str) -> rusqlite::Result<Vec<MemberRow>> {
     let like = format!("%{}%", q.trim());
     let mut st = db.prepare(
         "SELECT m.id, m.full_name,
-                (SELECT al.direction FROM attendance_logs al WHERE al.member_id = m.id ORDER BY al.created_at DESC, al.rowid DESC LIMIT 1) as latest_dir
+                (SELECT al.direction FROM attendance_logs al WHERE al.member_id = m.id ORDER BY al.created_at DESC, al.rowid DESC LIMIT 1) as latest_dir,
+                coalesce(m.status, 'active') as status,
+                m.expires_at
          FROM members m 
          WHERE m.full_name LIKE ?1 OR m.id LIKE ?1 
          ORDER BY m.full_name 
@@ -685,7 +750,9 @@ pub fn member_search(q: &str) -> rusqlite::Result<Vec<MemberRow>> {
         .query_map(params![like], |r| {
             let latest_dir: Option<String> = r.get(2)?;
             let is_inside = latest_dir.as_deref().unwrap_or("out").eq_ignore_ascii_case("in");
-            Ok(MemberRow { id: r.get(0)?, full_name: r.get(1)?, is_inside })
+            let status: String = r.get(3)?;
+            let expires_at: Option<String> = r.get(4)?;
+            Ok(MemberRow { id: r.get(0)?, full_name: r.get(1)?, is_inside, status, expires_at })
         })?
         .collect();
     rows
@@ -696,6 +763,55 @@ pub struct MemberRow {
     pub id: String,
     pub full_name: String,
     pub is_inside: bool,
+    pub status: String,
+    pub expires_at: Option<String>,
+}
+
+/// Cache a promo voucher pulled from Supabase.
+pub fn upsert_promo(code: &str, pct_off: f64, active: bool) -> rusqlite::Result<()> {
+    let db = conn().lock().unwrap();
+    db.execute(
+        "INSERT INTO promos_cache(code, pct_off, active) VALUES(?1, ?2, ?3)
+         ON CONFLICT(code) DO UPDATE SET pct_off=excluded.pct_off, active=excluded.active",
+        params![code, pct_off, if active { 1 } else { 0 }],
+    )?;
+    Ok(())
+}
+
+/// Reconcile local promos against the active list from the cloud.
+pub fn reconcile_promos(present_codes: &[String]) -> rusqlite::Result<()> {
+    let db = conn().lock().unwrap();
+    if present_codes.is_empty() {
+        db.execute("DELETE FROM promos_cache", [])?;
+    } else {
+        let mut query = String::from("DELETE FROM promos_cache WHERE code NOT IN (");
+        for (i, _) in present_codes.iter().enumerate() {
+            if i > 0 {
+                query.push(',');
+            }
+            query.push_str(&format!("?{}", i + 1));
+        }
+        query.push(')');
+        let mut stmt = db.prepare(&query)?;
+        let params_vec: Vec<&dyn rusqlite::ToSql> = present_codes.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        stmt.execute(params_vec.as_slice())?;
+    }
+    Ok(())
+}
+
+/// Validate promo code: returns Some(pct_off) if active, None if invalid or inactive.
+pub fn validate_promo(code: &str) -> rusqlite::Result<Option<f64>> {
+    let db = conn().lock().unwrap();
+    let pct: rusqlite::Result<f64> = db.query_row(
+        "SELECT pct_off FROM promos_cache WHERE code=?1 AND active=1",
+        params![code.trim()],
+        |r| r.get(0),
+    );
+    match pct {
+        Ok(p) => Ok(Some(p)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Recent sales for the POS history pane (local-first; cloud rows land via sync pull).
@@ -862,5 +978,58 @@ mod tests {
 
         reconcile_staff(&[]).expect("reconcile"); // removed in dashboard → gone next pull
         assert!(!staff_locked().unwrap(), "empty cache => fresh install stays open");
+    }
+
+    #[test]
+    fn promos_cache_and_validation() {
+        setup();
+        upsert_promo("VIP20", 20.0, true).expect("upsert promo");
+        // Case insensitive lookup
+        assert_eq!(validate_promo("vip20").unwrap(), Some(20.0));
+        assert_eq!(validate_promo("VIP20").unwrap(), Some(20.0));
+        assert_eq!(validate_promo("UNKNOWN").unwrap(), None);
+
+        // Deactivated promo returns None
+        upsert_promo("VIP20", 20.0, false).expect("deactivate promo");
+        assert_eq!(validate_promo("vip20").unwrap(), None);
+
+        // Reactivate & reconcile
+        upsert_promo("VIP20", 20.0, true).expect("reactivate");
+        upsert_promo("WINTER50", 50.0, true).expect("upsert winter");
+        reconcile_promos(&["VIP20".into()]).expect("reconcile");
+        assert_eq!(validate_promo("vip20").unwrap(), Some(20.0));
+        assert_eq!(validate_promo("winter50").unwrap(), None, "reconcile dropped winter50");
+    }
+
+    #[test]
+    fn member_lifecycle_guard_expired_and_frozen() {
+        setup();
+        let m_active = uuid::Uuid::new_v4().to_string();
+        let m_expired = uuid::Uuid::new_v4().to_string();
+        let m_frozen = uuid::Uuid::new_v4().to_string();
+
+        let future = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        let past = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+
+        upsert_member_cloud(&m_active, "Active Hunter", "active", Some(&future)).expect("active");
+        upsert_member_cloud(&m_expired, "Expired Hunter", "active", Some(&past)).expect("expired");
+        upsert_member_cloud(&m_frozen, "Frozen Hunter", "frozen", Some(&future)).expect("frozen");
+
+        // Active checks in fine
+        let check_res = log_checkin(&m_active, 0.98).expect("active checkin");
+        assert_ne!(check_res, "expired");
+        assert_ne!(check_res, "frozen");
+
+        // Expired is denied with "expired"
+        let exp_res = log_checkin(&m_expired, 0.98).expect("expired checkin");
+        assert_eq!(exp_res, "expired");
+
+        // Frozen is denied with "frozen"
+        let frz_res = log_checkin(&m_frozen, 0.98).expect("frozen checkin");
+        assert_eq!(frz_res, "frozen");
+
+        // Manual override still passes regardless of status
+        let man_res = log_manual_override(Some("Staff Override")).expect("manual override");
+        assert_ne!(man_res, "expired");
     }
 }

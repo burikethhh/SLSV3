@@ -171,17 +171,19 @@ serve(async (req) => {
     // could previously push any peso figure and the dashboard reported it.
     // Unknown/negative lines are dropped; a >1-peso mismatch is rejected.
     const lines = Array.isArray(items) ? items : [];
-    const cleanLines: { product_id: string | null; qty: number; unit_cents: number }[] = [];
+    const cleanLines: { product_id: string | null; qty: number; unit_cents: number; discount_cents?: number }[] = [];
     for (const it of lines) {
       const r = (it ?? {}) as Record<string, unknown>;
       const qty = Math.floor(Number(r.qty ?? 0));
       const unit = Math.floor(Number(r.unit_cents ?? 0));
       if (!Number.isFinite(qty) || !Number.isFinite(unit) || qty <= 0 || unit < 0) continue;
       if (qty > 999 || unit > 100_000_00) continue; // sanity caps per line
-      cleanLines.push({ product_id: asUuid(r.product_id), qty, unit_cents: unit });
+      const rawDiscount = Math.floor(Number(r.discount_cents ?? 0));
+      const discount = Number.isFinite(rawDiscount) && rawDiscount > 0 ? Math.min(qty * unit, rawDiscount) : 0;
+      cleanLines.push({ product_id: asUuid(r.product_id), qty, unit_cents: unit, discount_cents: discount });
     }
     if (!cleanLines.length) { skipped++; continue; }
-    const computed = cleanLines.reduce((a, l) => a + l.qty * l.unit_cents, 0);
+    const computed = cleanLines.reduce((a, l) => a + Math.max(0, l.qty * l.unit_cents - (l.discount_cents ?? 0)), 0);
     const claimed = Math.floor(Number(s.total_cents ?? NaN));
     // Tolerate sub-peso rounding from old terminals, reject anything bigger.
     if (!Number.isFinite(claimed) || claimed < 0 || Math.abs(claimed - computed) > 100) {
@@ -212,13 +214,17 @@ serve(async (req) => {
   // Pull side: catalog for this gym (owner edits land on terminal next poll).
   // product_ids is the FULL list — terminal deletes locals missing from it.
   // staff = terminal PIN cache (PHC pin_hash; verified offline on-device).
-  const [products, productIds, staff] = await Promise.all([
+  // promos = active discount vouchers for this gym or global templates.
+  // members = active member status & plan expiration dates for gate guard.
+  const [products, productIds, staff, promos, membersList] = await Promise.all([
     supa.from("products").select("id,name,price_cents,stock").eq("gym_id", gymId).limit(500),
     supa.from("products").select("id").eq("gym_id", gymId).limit(PRODUCT_IDS_CAP),
     supa.from("staff").select("id,username,pin_hash,role,active").eq("gym_id", gymId).eq("active", true).limit(100),
+    supa.from("promos").select("code,pct_off,active").or(`gym_id.is.null,gym_id.eq.${gymId}`).eq("active", true).limit(100),
+    supa.from("members").select("id,full_name,status,expires_at").eq("gym_id", gymId).is("deleted_at", null).limit(500),
   ]);
-  if (products.error || productIds.error || staff.error) {
-    console.error("pull", products.error?.message ?? productIds.error?.message ?? staff.error?.message);
+  if (products.error || productIds.error || staff.error || promos.error || membersList.error) {
+    console.error("pull", products.error?.message ?? productIds.error?.message ?? staff.error?.message ?? promos.error?.message ?? membersList.error?.message);
     return Response.json({ remote_disabled: false, error: "pull failed" }, { status: 502 });
   }
 
@@ -227,7 +233,10 @@ serve(async (req) => {
     products: products.data ?? [],
     product_ids: (productIds.data ?? []).map((p) => p.id as string),
     staff: staff.data ?? [],
+    promos: promos.data ?? [],
+    members: membersList.data ?? [],
     skipped,
     server_time: Date.now(),
   });
 });
+
