@@ -33,7 +33,16 @@ async function refreshHeader() {
     const st = await invoke("license_status");
     const t = String(st?.type ?? "unknown").toLowerCase();
     const rankBadge = t === "valid" ? "badge-ultra" : t === "graceperiod" ? "warn" : "bad";
-    const rankLabel = t === "valid" ? "S · ULTRA" : t === "graceperiod" ? "GRACE PERIOD" : t;
+    let rankLabel = t.toUpperCase();
+    if (t === "valid") {
+      const d = st?.days_remaining;
+      rankLabel = d !== undefined ? `S · ULTRA (${d}d)` : "S · ULTRA";
+    } else if (t === "graceperiod") {
+      const g = st?.grace_days_remaining;
+      rankLabel = g !== undefined ? `⚠️ GRACE (${g}d)` : "GRACE PERIOD";
+    } else if (t === "expired") {
+      rankLabel = "❌ EXPIRED";
+    }
     setBadge("hdr-license", rankLabel, rankBadge);
     const gym = document.getElementById("hdr-gym");
     if (gym && st?.gym_name) gym.textContent = String(st.gym_name).toUpperCase();

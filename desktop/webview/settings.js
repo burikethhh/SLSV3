@@ -115,22 +115,44 @@ function renderSettings(root) {
   root.innerHTML = `
     <h2>Settings — License &amp; Cloud Gateway</h2>
     <div style="display:flex;flex-direction:column;gap:14px;max-width:680px;margin-top:12px">
-      <div class="glass panel">
-        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">CLOUD CONNECTION</h3>
-        <label>Supabase Gateway URL <input id="set-url" placeholder="${DEFAULT_URL}" style="width:100%" /></label>
-        <div style="margin-top:10px">
-          <button id="set-save-url">Save URL Only</button>
+      <div class="glass panel" style="border: 1px solid rgba(139, 92, 246, 0.4); background: rgba(139, 92, 246, 0.05);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0;font-size:1.15rem;color:var(--brand);letter-spacing:1px">DIRECT CLOUD ACTIVATION</h3>
+          <span class="badge badge-pro" style="font-size:11px">Zero Friction</span>
         </div>
+        <p class="hint" style="margin:0 0 12px">Sign in with your SLS Account to automatically fetch your gym's trial or production license and license GymPOS without copying keys.</p>
+        <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+          <div>
+            <label style="font-size:12px;color:var(--muted)">SLS Account Email</label>
+            <input id="cloud-email" type="email" placeholder="owner@gym.com" style="width:100%" />
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--muted)">Password</label>
+            <input id="cloud-pass" type="password" placeholder="••••••••" style="width:100%" />
+          </div>
+        </div>
+        <button id="cloud-login-btn" class="primary" style="width:100%;height:42px;font-weight:700;font-size:14px">
+          ⚡ Login with SLS Account &amp; License GymPOS
+        </button>
+        <div id="cloud-msg" class="hint" style="margin-top:8px"></div>
       </div>
 
       <div class="glass panel">
-        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">LICENSE &amp; HUNTER GUILD RANK</h3>
+        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">MANUAL LICENSE KEY &amp; HUNTER GUILD RANK</h3>
         <label>Terminal License Key (GPOS-…) <textarea id="set-token" rows="3" style="width:100%;font-family:monospace" placeholder="GPOS-…"></textarea></label>
         <div style="margin-top:10px">
           <button id="set-apply" class="primary">Apply &amp; Verify License</button>
         </div>
         <p id="set-msg" class="hint" style="margin-top:8px"></p>
         <div id="set-status" class="hint" style="margin-top:8px"></div>
+      </div>
+
+      <div class="glass panel">
+        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">CLOUD GATEWAY CONNECTION</h3>
+        <label>Supabase Gateway URL <input id="set-url" placeholder="${DEFAULT_URL}" style="width:100%" /></label>
+        <div style="margin-top:10px">
+          <button id="set-save-url">Save URL Only</button>
+        </div>
       </div>
 
       <div class="glass panel">
@@ -148,9 +170,100 @@ function renderSettings(root) {
   bindActions();
 }
 
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRsZnl0ZXZqaHpjZ3J0dGNkaXBxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEwODgzNTksImV4cCI6MjEwNjY2NDM1OX0.oS15b2wahLDuSeMZ99NX2toZrOFvEOfe2ddYnRwiwc4";
+
 async function bindActions() {
   const url = await invoke?.("settings_get", { key: "supabase_url" }).catch(() => null);
   document.getElementById("set-url").value = url || DEFAULT_URL;
+
+  // ── Direct Cloud Sign-In & Activation ──
+  document.getElementById("cloud-login-btn").onclick = async () => {
+    const email = document.getElementById("cloud-email").value.trim();
+    const password = document.getElementById("cloud-pass").value;
+    const supabaseUrl = document.getElementById("set-url").value.trim() || DEFAULT_URL;
+    const msg = document.getElementById("cloud-msg");
+    if (!email || !password) {
+      msg.textContent = "Please enter both your SLS account email and password.";
+      msg.style.color = "#fbbf24";
+      return;
+    }
+    msg.textContent = "Signing in with SLS Cloud…";
+    msg.style.color = "#38bdf8";
+
+    try {
+      // 1. Authenticate with Supabase Auth
+      const authRes = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!authRes.ok) {
+        const err = await authRes.json().catch(() => ({}));
+        throw new Error(err.error_description || err.msg || "Authentication failed. Please check credentials.");
+      }
+      const authData = await authRes.json();
+      const accessToken = authData.access_token;
+
+      msg.textContent = "Authenticated! Fetching assigned license key from cloud…";
+
+      // 2. Query license from Supabase with RLS
+      const licRes = await fetch(`${supabaseUrl}/rest/v1/licenses?select=id,gym_id,revoked,expires_at,tier,price_usd,is_trial,raw_token&order=created_at.desc&limit=5`, {
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      if (!licRes.ok) throw new Error("Could not fetch licenses: " + (await licRes.text()));
+      const licenses = await licRes.json();
+      if (!licenses || licenses.length === 0) {
+        throw new Error("No license key found for this account. If you just registered, your application is pending review or no gym is linked.");
+      }
+
+      const lic = licenses.find((l) => !l.revoked) || licenses[0];
+      if (lic.revoked) {
+        throw new Error("License has been revoked by system administration. Terminal locked.");
+      }
+
+      const now = Date.now();
+      const exp = new Date(lic.expires_at).getTime();
+      const diffDays = (exp - now) / 86400000;
+
+      if (diffDays < -3) {
+        throw new Error(`License expired on ${new Date(lic.expires_at).toLocaleDateString()} and 3-day grace period has elapsed. Please renew subscription on web portal.`);
+      }
+
+      if (!lic.raw_token) {
+        throw new Error("License record exists but key token is missing. Please contact CEO.");
+      }
+
+      // 3. Apply license via Tauri invoke
+      if (invoke) {
+        await invoke("license_apply", { token: lic.raw_token, supabase_url: supabaseUrl });
+      }
+
+      const typeStr = lic.is_trial ? "14-Day Free Trial" : "30-Day Official Subscription";
+      if (diffDays <= 0 && diffDays >= -3) {
+        const graceLeft = Math.ceil(3 + diffDays);
+        msg.innerHTML = `⚠️ <strong style="color:#ffd166">3-Day Grace Period Active (${graceLeft}d left)</strong><br/>` +
+          `Account: ${escapeHtml(email)} · ${lic.tier.toUpperCase()} Tier (${typeStr})<br/>` +
+          `GymPOS licensed and active under grace period!`;
+        msg.style.color = "#ffd166";
+      } else {
+        const daysLeft = Math.ceil(diffDays);
+        msg.innerHTML = `✅ <strong style="color:#3ddc97">Terminal Successfully Licensed!</strong><br/>` +
+          `Account: ${escapeHtml(email)} · ${lic.tier.toUpperCase()} Tier (${typeStr})<br/>` +
+          `${daysLeft} days remaining on subscription.<br/>` +
+          `<span style="font-size:11px;color:#94a3b8">Terminals and gates are now fully operational.</span>`;
+        msg.style.color = "#3ddc97";
+      }
+
+      document.getElementById("cloud-pass").value = "";
+      await refresh();
+    } catch (e) {
+      msg.textContent = String(e.message || e);
+      msg.style.color = "#ff6b6b";
+    }
+  };
 
   document.getElementById("set-apply").onclick = async () => {
     const msg = document.getElementById("set-msg");
@@ -235,7 +348,7 @@ async function showStatus(root) {
 async function fillStatus(el) {
   if (!invoke) {
     el.innerHTML =
-      `License: <strong style="color:#fbbf24">S · Ultra (Active)</strong> · Solo Leveling System HQ<br/>` +
+      `License: <strong style="color:#fbbf24">S · Ultra (Active · 30d remaining)</strong> · Solo Leveling System HQ<br/>` +
       `Pending sync: 0 · Controller: Connected`;
     return;
   }
@@ -247,7 +360,16 @@ async function fillStatus(el) {
     const t = String(type).toLowerCase();
     const color = t === "valid" ? "#3ddc97" : t === "graceperiod" ? "#ffd166" : "#ff6b6b";
     const detail = status?.gym_name ? ` · ${status.gym_name}` : "";
-    const label = t === "graceperiod" ? "grace period" : t;
+    let label = t;
+    if (t === "valid") {
+      const d = status?.days_remaining;
+      label = d !== undefined ? `valid (${d}d remaining)` : "valid";
+    } else if (t === "graceperiod") {
+      const g = status?.grace_days_remaining;
+      label = g !== undefined ? `⚠️ grace period (${g}d left before lock)` : "grace period";
+    } else if (t === "expired") {
+      label = "❌ expired (terminal locked)";
+    }
     const dlq = dropped ? ` · ${dropped} dropped (dead-letter)` : "";
     el.innerHTML =
       `License: <strong style="color:${color}">${label}</strong>${detail}<br/>` +

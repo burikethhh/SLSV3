@@ -46,7 +46,7 @@ export function initPos() {
                   r.stock <= 0
                     ? `<span class="stock-badge oos">Out of Stock</span>`
                     : r.stock <= 5
-                    ? `<span class="stock-badge low">${r.stock} Left</span>`
+                    ? `<span class="stock-badge low">⚠️ Low Stock (${r.stock})</span>`
                     : `<span class="stock-badge instock">${r.stock} in Stock</span>`;
                 const isDisabled = r.stock <= 0;
                 return (

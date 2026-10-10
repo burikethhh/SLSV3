@@ -193,36 +193,110 @@ function renderLogin() {
 }
 
 function renderRegister() {
-  view().innerHTML = `<div class="auth-wrap"><div class="glass-panel auth-card">
+  view().innerHTML = `<div class="auth-wrap"><div class="glass-panel auth-card" style="max-width:520px">
     <div id="brandlogo" style="margin: 0 auto 16px; width: 56px; height: 56px; border-radius: 14px; overflow: hidden; padding: 0; border: 1.5px solid rgba(139, 92, 246, 0.65); box-shadow: 0 0 20px rgba(139, 92, 246, 0.5);">
       <img src="/icon.jpg" alt="SLS Emblem" style="width: 100%; height: 100%; object-fit: cover;" />
     </div>
-    <h2 class="brand">SYSTEM REGISTER</h2>
-    <p class="muted" style="margin-top:-6px;margin-bottom:18px">Create system owner account</p>
-    <input id="em" placeholder="email" /><input id="pw" type="password" placeholder="min 8 chars" />
-    <button class="primary" id="go">Register</button>
-    <p id="login-msg" class="muted"></p>
-    <p class="muted">After register + sign-in, ask CEO to grant <strong>owner</strong> + gym_ids under Users (JWT claims required for RLS).</p>
-    <div class="auth-links"><a href="#/login">← Back to sign in</a></div>
+    <h2 class="brand">GYM OWNER APPLICATION</h2>
+    <p class="muted" style="margin-top:-6px;margin-bottom:16px">Apply for gym owner role &amp; receive an instant 14-day trial key</p>
+    
+    <label style="display:block;text-align:left;font-size:11px;color:var(--muted);margin-bottom:4px">ACCOUNT CREDENTIALS</label>
+    <input id="em" placeholder="Email address" type="email" style="margin-bottom:8px;width:100%" />
+    <input id="pw" type="password" placeholder="Password (minimum 8 characters)" style="margin-bottom:14px;width:100%" />
+    
+    <label style="display:block;text-align:left;font-size:11px;color:var(--muted);margin-bottom:4px">GYM FACILITY DETAILS</label>
+    <input id="reg-gym" placeholder="Gym name (e.g. Iron Forge Fitness)" style="margin-bottom:8px;width:100%" />
+    <input id="reg-loc" placeholder="Branch location (e.g. Makati, Metro Manila)" style="margin-bottom:8px;width:100%" />
+    
+    <label style="display:block;text-align:left;font-size:11px;color:var(--muted);margin-bottom:4px">SUBSCRIPTION TIER</label>
+    <select id="reg-tier" style="margin-bottom:14px;width:100%">
+      <option value="basic">Basic Tier — up to 200 Hunters ($99/mo)</option>
+      <option value="pro" selected>Pro Tier — up to 500 Hunters ($199/mo)</option>
+      <option value="ultra">Ultra Tier — up to 1,000 Hunters ($349/mo)</option>
+    </select>
+    
+    <button class="primary" id="go" style="width:100%;height:44px;font-size:15px;margin-top:6px">Submit Application &amp; Get Trial Key</button>
+    <p id="login-msg" class="muted" style="margin-top:10px"></p>
+    
+    <div id="trial-card" hidden class="panel" style="margin-top:14px;border:1px solid rgba(52,211,153,0.4);background:rgba(52,211,153,0.08);text-align:left"></div>
+    
+    <div class="auth-links" style="margin-top:12px"><a href="#/login">← Already have an account? Sign in</a></div>
   </div></div>`;
+
   (document.getElementById("go") as HTMLButtonElement).onclick = async (ev) => {
     const btn = ev.currentTarget as HTMLButtonElement;
-    const em = (document.getElementById("em") as HTMLInputElement).value;
-    const pw = (document.getElementById("pw") as HTMLInputElement).value;
+    const em = (document.getElementById("em") as HTMLInputElement).value.trim();
+    const pw = (document.getElementById("pw") as HTMLInputElement).value.trim();
+    const gymName = (document.getElementById("reg-gym") as HTMLInputElement).value.trim();
+    const location = (document.getElementById("reg-loc") as HTMLInputElement).value.trim();
+    const tier = (document.getElementById("reg-tier") as HTMLSelectElement).value;
+
+    if (!em || !pw) { loginMsg("Email and password are required.", "#f87171"); return; }
+    if (pw.length < 8) { loginMsg("Password must be at least 8 characters.", "#f87171"); return; }
+    if (!gymName) { loginMsg("Gym name is required.", "#f87171"); return; }
+
     btn.disabled = true;
     btn.classList.add("busy");
-    btn.textContent = "Registering…";
+    btn.textContent = "Creating account & trial key…";
+
     try {
       await signUpOwner(em, pw);
-      const s = await session();
-      if (s) go(homeFor(roleOf(s)));
-      else loginMsg("Check your email to confirm the account, then sign in.", "#34d399");
+      let s = await session();
+      if (!s) {
+        await signIn(em, pw);
+        s = await session();
+      }
+      if (!s) {
+        loginMsg("Account created! Please check your email to verify, then sign in.", "#34d399");
+        return;
+      }
+
+      const base = import.meta.env.VITE_SUPABASE_URL;
+      const res = await fetch(`${base}/functions/v1/owner-apply`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${s.access_token}`,
+        },
+        body: JSON.stringify({ gym_name: gymName, location, tier }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Application error: ${text}`);
+      }
+
+      const applyData = await res.json();
+      const trialCard = document.getElementById("trial-card")!;
+      trialCard.hidden = false;
+      trialCard.innerHTML = `
+        <div style="font-weight:700;color:#34d399;font-size:14px;margin-bottom:6px">✓ APPLICATION SUBMITTED &amp; TRIAL KEY ACTIVE</div>
+        <p style="font-size:12px;margin:4px 0" class="muted">
+          Your gym <strong>${gymName}</strong> is registered. While awaiting CEO verification, your <strong>14-day free trial key</strong> is active!
+        </p>
+        <div style="margin:8px 0">
+          <div style="font-size:11px;color:var(--cyan);font-weight:700">TRIAL LICENSE KEY:</div>
+          <textarea readonly rows="2" style="width:100%;font-size:11px;font-family:monospace;background:#0d1117;color:#c9d1d9;padding:6px;border-radius:4px;border:1px solid rgba(255,255,255,0.1);margin-top:2px">${applyData.token || "Active in Cloud"}</textarea>
+        </div>
+        <p style="font-size:11px;color:#94a3b8;margin:4px 0">
+          💡 <strong>GymPOS Tip:</strong> On your turnstile terminal, simply click <em>"Login with SLS Account"</em> using this email &amp; password — the trial license activates automatically!
+        </p>
+        <button id="go-owner-dash" class="primary" style="width:100%;margin-top:10px">Enter Owner Dashboard →</button>
+      `;
+
+      loginMsg("Application submitted successfully!", "#34d399");
+      btn.style.display = "none";
+
+      document.getElementById("go-owner-dash")?.addEventListener("click", async () => {
+        await signIn(em, pw);
+        const refreshed = await session();
+        go(homeFor(refreshed ? roleOf(refreshed) : "owner"));
+      });
     } catch (e) {
       loginMsg(String((e as Error).message ?? e), "#f87171");
-    } finally {
       btn.disabled = false;
       btn.classList.remove("busy");
-      btn.textContent = "Register";
+      btn.textContent = "Submit Application & Get Trial Key";
     }
   };
 }

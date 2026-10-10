@@ -146,10 +146,13 @@ async function overview(root: HTMLElement) {
 }
 
 async function fleet(root: HTMLElement, token: number) {
-  root.innerHTML = `<p class="muted" style="margin-top:0">Remote kill switch per gym — terminals lock on next sync poll (~30s).</p>
+  root.innerHTML = `<div id="pending-apps-container" style="margin-bottom:20px"></div>
+    <p class="muted" style="margin-top:0">Remote kill switch per gym — terminals lock on next sync poll (~30s).</p>
     <div class="panel row"><input id="q" placeholder="Filter gyms…" />
     <select id="f"><option value="all">all</option>
-    <option value="disabled">disabled</option><option value="live">live</option></select>
+    <option value="pending">pending approval</option>
+    <option value="live">live</option>
+    <option value="disabled">disabled</option></select>
     <button class="primary" id="new-gym">+ New gym</button></div>
     <div id="gym-form" hidden class="panel row" style="margin:8px 0">
       <input id="gn" placeholder="Gym name" /><input id="gt" placeholder="gym_id (optional)" />
@@ -157,7 +160,74 @@ async function fleet(root: HTMLElement, token: number) {
       <button class="primary" id="g-save">Create gym</button>
       <span id="g-msg" class="muted"></span>
     </div>
-    <table><thead><tr><th>Gym</th><th>Tier</th><th>ID</th><th>Status</th><th></th></tr></thead><tbody id="tb"></tbody></table>`;
+    <table><thead><tr><th>Gym</th><th>Tier</th><th>ID</th><th>Owner</th><th>Status</th><th></th></tr></thead><tbody id="tb"></tbody></table>`;
+
+  const drawPending = async () => {
+    const c = document.getElementById("pending-apps-container");
+    if (!c || token !== viewToken) return;
+    const { data: pending, error } = await db()
+      .from("gyms")
+      .select("id,name,location,tier,owner_email,created_at,status")
+      .eq("status", "pending")
+      .order("created_at", { ascending: false });
+
+    if (error || !pending || pending.length === 0) {
+      c.innerHTML = `<div class="glass-panel panel" style="padding:12px 16px;border-left:4px solid #38bdf8">
+        <span style="font-weight:600;color:#38bdf8">NO PENDING APPLICATIONS</span>
+        <span class="muted" style="margin-left:8px;font-size:13px">— All gym owner registrations are reviewed and active.</span>
+      </div>`;
+      return;
+    }
+
+    c.innerHTML = `<div class="glass-panel panel" style="border:1px solid rgba(245,158,11,0.4);background:rgba(245,158,11,0.04)">
+      <div class="stat-top" style="margin-bottom:8px">
+        <div class="row" style="gap:8px">
+          <span class="pulse-dot" style="background:#fbbf24"></span>
+          <span class="stat-k" style="color:#fbbf24;font-size:14px;letter-spacing:1px">PENDING GYM OWNER APPLICATIONS (${pending.length})</span>
+        </div>
+        <span class="muted" style="font-size:12px">Trial key issued · Awaiting CEO review to start official 30-day subscription</span>
+      </div>
+      <table style="margin-top:8px"><thead><tr>
+        <th>Gym Name</th><th>Location</th><th>Tier</th><th>Applicant Email</th><th>Applied</th><th>Action</th>
+      </tr></thead><tbody>
+      ${pending.map((p) => `<tr>
+        <td><strong>${esc(p.name)}</strong></td>
+        <td>${esc(p.location || "—")}</td>
+        <td>${tierBadge(p.tier)}</td>
+        <td class="muted">${esc(p.owner_email || "—")}</td>
+        <td class="muted">${p.created_at ? new Date(p.created_at).toLocaleDateString() : "—"}</td>
+        <td>
+          <button class="primary" data-approve="${p.id}" style="padding:4px 12px;font-size:12px;background:#10b981;border-color:#059669">
+            ✓ Approve (Start 30-Day Sub)
+          </button>
+        </td>
+      </tr>`).join("")}
+      </tbody></table>
+    </div>`;
+
+    c.querySelectorAll("[data-approve]").forEach((btn) => {
+      (btn as HTMLButtonElement).onclick = async () => {
+        const gymId = (btn as HTMLElement).dataset.approve!;
+        const ok = await confirmModal({
+          title: "Approve Gym Owner Application?",
+          body: "This will promote the gym to Active status, start their official 30-day production subscription, and verify the gym owner's account.",
+          confirmLabel: "Approve & Start 30-Day Sub",
+        });
+        if (!ok) return;
+        (btn as HTMLButtonElement).disabled = true;
+        (btn as HTMLButtonElement).textContent = "Approving…";
+        try {
+          await callFn("gym-admin", { action: "approve_application", gym_id: gymId });
+          await drawPending();
+          await draw();
+        } catch (e) {
+          alert(`Approval failed: ${e}`);
+          (btn as HTMLButtonElement).disabled = false;
+          (btn as HTMLButtonElement).textContent = "✓ Approve (Start 30-Day Sub)";
+        }
+      };
+    });
+  };
 
   const draw = async () => {
     const qEl = document.getElementById("q") as HTMLInputElement | null;
@@ -166,26 +236,50 @@ async function fleet(root: HTMLElement, token: number) {
     if (token !== viewToken || !qEl || !fEl || !tb) return; // debounced fire after navigation
     const q = qEl.value;
     const f = fEl.value;
-    let query = db().from("gyms").select("id,name,tier,disabled").order("name").limit(50);
+    let query = db().from("gyms").select("id,name,tier,disabled,status,owner_email").order("name").limit(50);
     if (q) query = query.ilike("name", `%${q}%`);
     if (f === "disabled") query = query.eq("disabled", true);
-    if (f === "live") query = query.eq("disabled", false);
+    if (f === "live") query = query.eq("disabled", false).neq("status", "pending");
+    if (f === "pending") query = query.eq("status", "pending");
     const { data, error } = await query;
     const tbEl = document.getElementById("tb");
     if (token !== viewToken || !tbEl) return;
     if (error) {
-      tbEl.innerHTML = `<tr><td colspan="5" class="pill bad">${esc(error.message)}</td></tr>`;
+      tbEl.innerHTML = `<tr><td colspan="6" class="pill bad">${esc(error.message)}</td></tr>`;
       return;
     }
     tbEl.innerHTML = (data ?? [])
-      .map((g) => `<tr><td>${esc(g.name)}</td><td>${tierBadge(g.tier)}</td><td class="muted" title="${g.id}">${g.id.slice(0, 8)}…</td>
-        <td>${g.disabled ? '<span class="pill bad">disabled</span>' : '<span class="pill good">live</span>'}</td>
-        <td><button data-kill="${g.id}" data-off="${g.disabled}">${g.disabled ? "Enable" : "Kill"}</button>
-        <button data-copy="${g.id}">Copy ID</button></td></tr>`)
-      .join("") || `<tr><td colspan="5" class="muted">No gyms — create one to issue a key.</td></tr>`;
+      .map((g) => {
+        const isPending = g.status === "pending";
+        const statusBadge = isPending
+          ? '<span class="pill warn" style="background:rgba(245,158,11,0.2);color:#fbbf24;border:1px solid rgba(245,158,11,0.4)">pending review</span>'
+          : g.disabled
+          ? '<span class="pill bad">disabled</span>'
+          : '<span class="pill good">live</span>';
+        const actionBtn = isPending
+          ? `<button class="primary" data-quick-approve="${g.id}" style="padding:3px 8px;font-size:11px">Approve</button>`
+          : `<button data-kill="${g.id}" data-off="${g.disabled}">${g.disabled ? "Enable" : "Kill"}</button>`;
+        return `<tr><td>${esc(g.name)}</td><td>${tierBadge(g.tier)}</td><td class="muted" title="${g.id}">${g.id.slice(0, 8)}…</td>
+          <td class="muted">${esc(g.owner_email || "—")}</td>
+          <td>${statusBadge}</td>
+          <td>${actionBtn}
+          <button data-copy="${g.id}">Copy ID</button></td></tr>`;
+      })
+      .join("") || `<tr><td colspan="6" class="muted">No gyms found.</td></tr>`;
     root.querySelectorAll("[data-kill]").forEach((b) =>
       (b as HTMLButtonElement).onclick = () =>
         toggleKill((b as HTMLElement).dataset.kill!, (b as HTMLElement).dataset.off === "true").then(draw));
+    root.querySelectorAll("[data-quick-approve]").forEach((b) =>
+      (b as HTMLButtonElement).onclick = async () => {
+        const id = (b as HTMLElement).dataset.quickApprove!;
+        try {
+          await callFn("gym-admin", { action: "approve_application", gym_id: id });
+          await drawPending();
+          await draw();
+        } catch (e) {
+          alert(`Approval failed: ${e}`);
+        }
+      });
     root.querySelectorAll("[data-copy]").forEach((b) =>
       (b as HTMLButtonElement).onclick = () => navigator.clipboard?.writeText((b as HTMLElement).dataset.copy!));
   };
@@ -214,6 +308,7 @@ async function fleet(root: HTMLElement, token: number) {
 
   (document.getElementById("q") as HTMLInputElement).oninput = debounce(draw);
   (document.getElementById("f") as HTMLSelectElement).onchange = draw;
+  await drawPending();
   await draw();
 }
 

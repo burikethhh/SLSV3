@@ -62,18 +62,19 @@ async function overview(root: HTMLElement, s: Session, token: number) {
   const load = async () => {
     if (token !== viewToken || !root.isConnected) return; // navigated away mid-fetch
     const [{ data: sales }, { data: att }, { count: members }, { data: products }, { data: gyms },
-      { count: nProducts }, { count: nPlans }, { count: nPromos }, { count: nStaff }, { count: nKeys }] = await Promise.all([
+      { count: nProducts }, { count: nPlans }, { count: nPromos }, { count: nStaff }, { data: lics }] = await Promise.all([
       scope(db().from("sales").select("total_cents,created_at,gym_id,items,status").order("created_at", { ascending: false }).limit(500), s),
       scope(db().from("attendance").select("created_at,gym_id,member_id,direction").order("created_at", { ascending: false }).limit(500), s),
       scope(db().from("members").select("id", { count: "exact", head: true }).is("deleted_at", null), s),
       scope(db().from("products").select("id,name").limit(500), s),
-      db().from("gyms").select("id,name").order("name"),
+      db().from("gyms").select("id,name,status").order("name"),
       scope(db().from("products").select("id", { count: "exact", head: true }), s),
       scope(db().from("plans").select("id", { count: "exact", head: true }), s, "gym_id"),
       scope(db().from("promos").select("id", { count: "exact", head: true }).eq("active", true), s, "gym_id"),
       scope(db().from("staff").select("id", { count: "exact", head: true }), s),
-      scope(db().from("licenses").select("id", { count: "exact", head: true }), s),
+      scope(db().from("licenses").select("id,gym_id,expires_at,revoked,is_trial").order("created_at", { ascending: false }).limit(5), s),
     ]);
+    const nKeys = (lics ?? []).length;
     const now = new Date();
     const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -89,6 +90,44 @@ async function overview(root: HTMLElement, s: Session, token: number) {
     const todayRev = todaySales.reduce((a, r) => a + signed(r), 0);
     const todayAtt = attRows.filter((a) => new Date(a.created_at) >= dayStart);
     const todayExits = exitRows.filter((a) => new Date(a.created_at) >= dayStart);
+
+    // Dynamic License & Grace Period Alert Banner
+    let ovBanner = "";
+    const pendingGym = (gyms ?? []).find((g) => g.status === "pending");
+    const activeLic = (lics ?? []).find((l) => !l.revoked);
+    if (pendingGym) {
+      ovBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid rgba(245,158,11,0.5);background:rgba(245,158,11,0.06)">
+        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div class="row" style="gap:10px">
+            <span class="pulse-dot" style="background:#fbbf24"></span>
+            <div>
+              <strong style="color:#fbbf24;font-size:14px">APPLICATION PENDING CEO REVIEW · 14-DAY TRIAL KEY ACTIVE</strong>
+              <p class="muted" style="margin:2px 0 0;font-size:12px">Your trial license is active. Official 30-day subscription begins immediately once approved by the CEO.</p>
+            </div>
+          </div>
+          <a href="#/owner/keys" class="stat-badge badge-basic" style="text-decoration:none">View License Key</a>
+        </div>
+      </div>`;
+    } else if (activeLic) {
+      const diff = (new Date(activeLic.expires_at).getTime() - now.getTime()) / 86400000;
+      if (diff <= 0 && diff >= -3) {
+        const graceDays = Math.ceil(3 + diff);
+        ovBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.12)">
+          <div class="row" style="gap:10px">
+            <span class="pulse-dot" style="background:#ef4444"></span>
+            <div>
+              <strong style="color:#ef4444;font-size:14px">⚠️ 3-DAY GRACE PERIOD RUNNING · ${graceDays} DAY(S) BEFORE TERMINAL LOCKOUT</strong>
+              <p class="muted" style="margin:2px 0 0;font-size:12px">Your subscription expired on ${new Date(activeLic.expires_at).toLocaleDateString()}. Please renew promptly to keep GymPOS terminals and gate maglocks operable.</p>
+            </div>
+          </div>
+        </div>`;
+      } else if (diff < -3) {
+        ovBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.2)">
+          <strong style="color:#ef4444;font-size:14px">❌ SUBSCRIPTION EXPIRED · TERMINALS LOCKED</strong>
+          <p class="muted" style="margin:2px 0 0;font-size:12px">Your subscription and 3-day grace period have both expired. Terminals are fail-closed.</p>
+        </div>`;
+      }
+    }
     // 30-day revenue trend
     const days: string[] = [];
     const dayTotals = new Array(30).fill(0);
@@ -137,6 +176,7 @@ async function overview(root: HTMLElement, s: Session, token: number) {
         <span class="muted" style="margin-right:8px">auto-refresh 60s</span>
         <button id="ov-print" class="btn-subtle" title="Print analytics report">Print Report</button>
       </span></div>
+      ${ovBanner}
       <div class="cards" id="ov-cards">
       ${stat("Month POS revenue", pesos(monthRev), "emerald", "money", "POS sales this calendar month (refunds subtracted, voids excluded)")}
       ${stat("Today POS revenue", pesos(todayRev), "emerald", "chart", `${todaySales.length} sales today`)}
@@ -293,46 +333,137 @@ async function overview(root: HTMLElement, s: Session, token: number) {
 
 async function keys(root: HTMLElement, s: Session) {
   const [{ data: gyms }, { data, error }] = await Promise.all([
-    db().from("gyms").select("id,name,tier,disabled").order("name"),
-    scope(db().from("licenses").select("id,gym_id,revoked,expires_at,created_at,tier,price_usd,days_valid"), s),
+    db().from("gyms").select("id,name,tier,disabled,status").order("name"),
+    scope(db().from("licenses").select("id,gym_id,revoked,expires_at,created_at,tier,price_usd,days_valid,is_trial,raw_token").order("created_at", { ascending: false }), s),
   ]);
   const gym = (id: string) => gyms?.find((g) => g.id === id);
-  root.innerHTML = `<div class="page-head"><h2>Branch keys</h2><span class="muted">license inventory</span></div>
-    <p class="muted">Your gym's license inventory. Tokens are show-once at issue (CEO Key Vault) — not re-downloadable here. Suspended = CEO kill/revoke; terminals lock on next sync (~30s).</p>
+  const now = Date.now();
+
+  const activeLic = (data ?? []).find((l) => !l.revoked);
+  let statusBanner = "";
+  if (activeLic) {
+    const exp = new Date(activeLic.expires_at).getTime();
+    const days = (exp - now) / 86400000;
+    const g = gym(activeLic.gym_id);
+    const isPending = g?.status === "pending";
+
+    if (isPending) {
+      statusBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid rgba(245,158,11,0.5);background:rgba(245,158,11,0.06)">
+        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div>
+            <div class="row" style="gap:8px">
+              <span class="pulse-dot" style="background:#fbbf24"></span>
+              <strong style="color:#fbbf24;font-size:14px">APPLICATION PENDING CEO APPROVAL · 14-DAY TRIAL ACTIVE</strong>
+            </div>
+            <p class="muted" style="margin:4px 0 0;font-size:12px">Your trial key is running (${Math.max(0, Math.ceil(days))} days left). Once CEO verifies your facility, the 30-day official subscription countdown begins.</p>
+          </div>
+          <span class="pill warn">Trial License</span>
+        </div>
+      </div>`;
+    } else if (days <= 0 && days >= -3) {
+      const graceLeft = Math.ceil(3 + days);
+      statusBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.12)">
+        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div>
+            <div class="row" style="gap:8px">
+              <span class="pulse-dot" style="background:#ef4444"></span>
+              <strong style="color:#ef4444;font-size:14px">⚠️ 3-DAY GRACE PERIOD RUNNING · ${graceLeft} DAY(S) BEFORE TERMINAL LOCKOUT</strong>
+            </div>
+            <p class="muted" style="margin:4px 0 0;font-size:12px">Your subscription expired on ${new Date(activeLic.expires_at).toLocaleDateString()}. Terminals will lock permanently after the 3-day grace period.</p>
+          </div>
+          <span class="pill bad">Grace Period Active</span>
+        </div>
+      </div>`;
+    } else if (days < -3) {
+      statusBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.2)">
+        <strong style="color:#ef4444;font-size:14px">❌ SUBSCRIPTION EXPIRED · GYMPOS TERMINALS LOCKED</strong>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">Both your active period and 3-day grace period have passed. Terminals are in fail-closed lock.</p>
+      </div>`;
+    }
+  }
+
+  root.innerHTML = `<div class="page-head"><h2>Branch keys & licenses</h2><span class="muted">license inventory</span></div>
+    ${statusBanner}
+    <div class="glass-panel panel" style="margin-bottom:14px;border:1px solid rgba(139,92,246,0.3);background:rgba(139,92,246,0.04)">
+      <div class="stat-top" style="margin-bottom:6px">
+        <span class="stat-k" style="color:var(--cyan)">⚡ ZERO-FRICTION TERMINAL ACTIVATION</span>
+        <span class="pill good" style="font-size:11px">Cloud Sign-In Ready</span>
+      </div>
+      <p class="muted" style="margin:0 0 8px;font-size:13px">You do not need to manually copy 500-character keys anymore. Simply open <strong>GymPOS → Settings</strong> and click <strong>"Login with SLS Account"</strong> with your email and password to automatically license the terminal.</p>
+    </div>
     ${error ? `<p class="pill bad">${esc(error.message)}</p>` : ""}
     ${(gyms ?? []).some((g) => g.disabled) ? `<p class="pill bad">At least one gym is disabled — terminals are locked.</p>` : ""}
-    <table><thead><tr><th>Gym</th><th>Tier</th><th>Key</th><th>Price</th><th>Expires</th><th>Status</th></tr></thead><tbody>
+    <table><thead><tr><th>Gym</th><th>Type</th><th>Tier</th><th>Key ID</th><th>Expires</th><th>Countdown</th><th>Status</th><th>Actions</th></tr></thead><tbody>
     ${(data ?? []).map((l) => {
       const g = gym(l.gym_id);
+      const exp = new Date(l.expires_at).getTime();
+      const diffDays = (exp - now) / 86400000;
+      let countText = "";
+      let statusBadge = "";
+
+      if (l.revoked || g?.disabled) {
+        statusBadge = '<span class="pill bad">suspended</span>';
+        countText = "Revoked";
+      } else if (diffDays > 7) {
+        statusBadge = '<span class="pill good">active</span>';
+        countText = `${Math.ceil(diffDays)} days remaining`;
+      } else if (diffDays > 0) {
+        statusBadge = '<span class="pill warn" style="background:rgba(245,158,11,0.2);color:#fbbf24;border:1px solid rgba(245,158,11,0.4)">expiring soon</span>';
+        countText = `${Math.ceil(diffDays)} days left`;
+      } else if (diffDays >= -3) {
+        statusBadge = '<span class="pill bad" style="background:rgba(239,68,68,0.25);color:#ef4444;border:1px solid #ef4444;font-weight:700">3-day grace</span>';
+        countText = `${Math.ceil(3 + diffDays)}d grace left`;
+      } else {
+        statusBadge = '<span class="pill bad">expired</span>';
+        countText = "Expired";
+      }
+
+      const copyBtn = l.raw_token
+        ? `<button data-copy-key="${esc(l.raw_token)}" style="padding:3px 8px;font-size:11px">Copy Key</button>`
+        : "—";
+
       return `<tr>
-        <td>${esc(g?.name ?? l.gym_id.slice(0, 8) + "…")}</td>
+        <td><strong>${esc(g?.name ?? l.gym_id.slice(0, 8) + "…")}</strong></td>
+        <td>${l.is_trial ? '<span class="stat-badge badge-basic">14-day trial</span>' : '<span class="stat-badge badge-pro">subscription</span>'}</td>
         <td>${esc(l.tier ?? g?.tier ?? "—")}</td>
         <td class="muted">${l.id.slice(0, 8)}…</td>
-        <td>${l.price_usd ? `$${l.price_usd}/mo` : "—"}</td>
         <td>${new Date(l.expires_at).toLocaleDateString()}</td>
-        <td>${l.revoked || g?.disabled
-          ? '<span class="pill bad">suspended</span>'
-          : '<span class="pill good">active</span>'}</td></tr>`;
-    }).join("") || `<tr><td colspan="6" class="muted">No keys for your gyms yet — ask CEO to issue.</td></tr>`}
+        <td style="font-weight:600;font-size:12px">${countText}</td>
+        <td>${statusBadge}</td>
+        <td>${copyBtn}</td></tr>`;
+    }).join("") || `<tr><td colspan="8" class="muted">No keys for your gyms yet — submit an application or ask CEO.</td></tr>`}
     </tbody></table>`;
+
+  root.querySelectorAll("[data-copy-key]").forEach((btn) => {
+    (btn as HTMLButtonElement).onclick = () => {
+      const key = (btn as HTMLElement).dataset.copyKey;
+      if (key) {
+        navigator.clipboard?.writeText(key);
+        (btn as HTMLButtonElement).textContent = "Copied!";
+        setTimeout(() => { (btn as HTMLButtonElement).textContent = "Copy Key"; }, 2000);
+      }
+    };
+  });
 }
 
 async function catalog(root: HTMLElement, s: Session, token: number) {
   const gyms = await writableGyms(s);
   const canWrite = gyms.length > 0;
   root.innerHTML = `<div class="page-head"><h2>POS products & pricing</h2><span class="muted">pushes to terminals on sync</span></div>
-  <div class="panel row">
-    <input id="q" placeholder="Search…" />
+  <div class="panel row" style="flex-wrap:wrap;gap:8px">
+    <input id="q" placeholder="Search products…" style="min-width:160px" />
     ${gymSelectHtml(gyms, "gym")}
-    <input id="n" placeholder="Name" /><input id="p" type="number" placeholder="price cents" style="width:120px" />
-    <button class="primary" id="add" ${canWrite ? "" : "disabled"}>Add</button></div>
-    <table><thead><tr><th>Name</th><th>Price</th><th>Stock</th><th></th></tr></thead><tbody id="tb"></tbody></table>
-    <p id="cat-msg" class="muted">${canWrite ? "Saves push to terminals on next sync pull. Per-branch overrides: phase next (table ready)." : "Read-only — no gym assigned to this account."}</p>`;
+    <input id="n" placeholder="Product name" style="flex:1;min-width:140px" />
+    <input id="p" type="number" step="0.01" min="0" placeholder="Price (₱)" style="width:120px" />
+    <input id="stk" type="number" min="0" placeholder="Stock" style="width:90px" value="50" />
+    <button class="primary" id="add" ${canWrite ? "" : "disabled"}>+ Add Product</button></div>
+    <table><thead><tr><th>Name</th><th>Price (₱)</th><th>Stock Level</th><th>Status</th><th></th></tr></thead><tbody id="tb"></tbody></table>
+    <p id="cat-msg" class="muted">${canWrite ? "Saves push to terminals on next sync pull. Low-stock triggers at ≤ 5 units." : "Read-only — no gym assigned to this account."}</p>`;
 
   const draw = async () => {
     const qEl = document.getElementById("q") as HTMLInputElement | null;
     const tb = document.getElementById("tb");
-    if (token !== viewToken || !qEl || !tb) return; // debounced fire after navigation
+    if (token !== viewToken || !qEl || !tb) return;
     const q = qEl.value;
     let query = scope(db().from("products").select("id,name,price_cents,stock").order("name").limit(50), s);
     if (q) query = query.ilike("name", `%${q}%`);
@@ -344,9 +475,24 @@ async function catalog(root: HTMLElement, s: Session, token: number) {
       return;
     }
     document.getElementById("tb")!.innerHTML = (data ?? [])
-      .map((p) => `<tr><td>${esc(p.name)}</td><td>${pesos(Number(p.price_cents))}</td><td>${p.stock}</td>
-        <td><button data-del="${p.id}">Delete</button></td></tr>`).join("")
-      || `<tr><td colspan="4" style="padding:0">${emptyState("Catalog is empty", "Add products above to push items to your POS terminals", "box")}</td></tr>`;
+      .map((p) => {
+        const stock = Number(p.stock ?? 0);
+        const isOos = stock <= 0;
+        const isLow = stock <= 5 && !isOos;
+        const badge = isOos
+          ? `<span class="pill bad" style="font-size:11px">Out of stock (0)</span>`
+          : isLow
+          ? `<span class="pill bad" style="font-size:11px;background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.4)">⚠️ Low Stock (${stock} left)</span>`
+          : `<span class="pill good" style="font-size:11px">${stock} in stock</span>`;
+
+        return `<tr>
+          <td><strong>${esc(p.name)}</strong></td>
+          <td style="font-weight:700;color:var(--cyan)">${pesos(Number(p.price_cents))}</td>
+          <td>${stock} units</td>
+          <td>${badge}</td>
+          <td><button data-del="${p.id}">Delete</button></td></tr>`;
+      }).join("")
+      || `<tr><td colspan="5" style="padding:0">${emptyState("Catalog is empty", "Add products above to push items to your POS terminals", "box")}</td></tr>`;
     root.querySelectorAll("[data-del]").forEach((b) =>
       (b as HTMLButtonElement).onclick = async () => {
         if (!await confirmModal({ title: "Delete product?", body: "Terminals drop it on next pull.", confirmLabel: "Delete", danger: true })) return;
@@ -355,7 +501,6 @@ async function catalog(root: HTMLElement, s: Session, token: number) {
         if (ids) del = del.in("gym_id", ids.length ? ids : ["00000000-0000-0000-0000-000000000000"]);
         const { error: delErr } = await del;
         if (delErr) {
-          // CEO / gym-less accounts hit RLS here — used to vanish silently.
           const m = document.getElementById("cat-msg");
           if (m) { m.textContent = `Delete failed: ${delErr.message}`; m.style.color = "#f87171"; }
           return;
@@ -368,16 +513,23 @@ async function catalog(root: HTMLElement, s: Session, token: number) {
     const msg = document.getElementById("cat-msg")!;
     const gymId = (document.getElementById("gym") as HTMLSelectElement | null)?.value;
     const name = (document.getElementById("n") as HTMLInputElement).value.trim();
+    const pricePesos = parseFloat((document.getElementById("p") as HTMLInputElement).value || "0");
+    const stockVal = parseInt((document.getElementById("stk") as HTMLInputElement).value || "0", 10);
     if (!canWrite || !gymId) { msg.textContent = "No gym selected — read-only account."; return; }
     if (!name) { msg.textContent = "Name required."; return; }
+    if (isNaN(pricePesos) || pricePesos < 0) { msg.textContent = "Valid price in Pesos required."; return; }
+
     const { error } = await db().from("products").insert({
       gym_id: gymId,
       name,
-      price_cents: Number((document.getElementById("p") as HTMLInputElement).value),
+      price_cents: Math.round(pricePesos * 100),
+      stock: isNaN(stockVal) ? 0 : Math.max(0, stockVal),
     });
     if (error) { msg.textContent = `Add failed: ${error.message}`; msg.style.color = "#f87171"; return; }
-    msg.textContent = "Added.";
+    msg.textContent = "Added product.";
     msg.style.color = "#34d399";
+    (document.getElementById("n") as HTMLInputElement).value = "";
+    (document.getElementById("p") as HTMLInputElement).value = "";
     draw();
   };
   await draw();
@@ -388,10 +540,10 @@ async function plans(root: HTMLElement, s: Session, token: number) {
   const canWrite = gyms.length > 0;
   const { data } = await scope(db().from("plans").select("*").order("price_cents").limit(50), s, "gym_id");
   root.innerHTML = `<div class="page-head"><h2>Membership plans</h2><span class="muted">global templates + branch plans</span></div>
-  <div class="panel row">
+  <div class="panel row" style="flex-wrap:wrap;gap:8px">
     ${gymSelectHtml(gyms, "gym")}
-    <input id="n" placeholder="Plan name" />
-    <input id="p" type="number" placeholder="price cents" style="width:120px" />
+    <input id="n" placeholder="Plan name" style="flex:1;min-width:140px" />
+    <input id="p" type="number" step="0.01" min="0" placeholder="Price (₱)" style="width:120px" />
     <input id="d" type="number" placeholder="days" value="30" style="width:80px" />
     <button class="primary" id="add" ${canWrite ? "" : "disabled"}>Add plan</button></div>
     <p id="plan-msg" class="muted">${canWrite ? "" : "Read-only — no gym assigned to this account."}</p>
@@ -407,12 +559,15 @@ async function plans(root: HTMLElement, s: Session, token: number) {
     const msg = document.getElementById("plan-msg")!;
     const gymId = (document.getElementById("gym") as HTMLSelectElement | null)?.value;
     const name = (document.getElementById("n") as HTMLInputElement).value.trim();
+    const pricePesos = parseFloat((document.getElementById("p") as HTMLInputElement).value || "0");
     if (!canWrite || !gymId) { msg.textContent = "No gym selected — read-only account."; return; }
     if (!name) { msg.textContent = "Plan name required."; return; }
+    if (isNaN(pricePesos) || pricePesos < 0) { msg.textContent = "Valid price in Pesos required."; return; }
+
     const { error } = await db().from("plans").insert({
       gym_id: gymId,
       name,
-      price_cents: Number((document.getElementById("p") as HTMLInputElement).value),
+      price_cents: Math.round(pricePesos * 100),
       duration_days: Number((document.getElementById("d") as HTMLInputElement).value) || 30,
     });
     if (error) { msg.textContent = `Add failed: ${error.message}`; msg.style.color = "#f87171"; return; }
