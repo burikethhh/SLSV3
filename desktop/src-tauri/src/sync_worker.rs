@@ -9,8 +9,8 @@
 //! token must not keep hammering the endpoint) → gate locks, UI Unlicensed.
 //!
 //! Heartbeat = only after a real 2xx (idle skips must NOT refresh the 7-day
-//! window). Dead-letter: outbox rows with attempts ≥ OUTBOX_DLQ_ATTEMPTS are
-//! dropped into the `sync_dropped` setting so one poisoned row can't wedge.
+//! window). Failed rows remain on disk; after the retry cap they are quarantined
+//! for manual recovery rather than silently deleted.
 
 #[cfg(feature = "cloud-sync")]
 pub use inner::*;
@@ -23,7 +23,7 @@ mod inner {
     use std::sync::Arc;
     use std::time::Duration;
 
-    /// Give up on an outbox row after this many failed pushes (dead-letter).
+    /// Quarantine a failed outbox row after this many attempts.
     pub const OUTBOX_DLQ_ATTEMPTS: u32 = 10;
     /// Mirror of the sync fn PRODUCT_IDS_CAP — at the cap the list may be
     /// truncated, so reconcile must be skipped rather than delete real stock.
@@ -127,11 +127,28 @@ mod inner {
                             if status >= 200 && status < 300 {
                                 failures = 0;
                                 let _ = db::heartbeat_ok();
-                                let ids: Vec<String> = batch.iter().map(|b| b.id.clone()).collect();
-                                let _ = db::clear_outbox(&ids);
+                                let batch_ids: HashSet<&str> = batch.iter().map(|b| b.id.as_str()).collect();
+                                let accepted: Vec<String> = body.get("accepted_ids")
+                                    .and_then(|v| v.as_array())
+                                    .map(|v| v.iter().filter_map(|id| id.as_str())
+                                        .filter(|id| batch_ids.contains(*id)).map(str::to_string).collect())
+                                    .unwrap_or_default();
+                                let _ = db::clear_outbox(&accepted);
+                                let accepted_set: HashSet<&str> = accepted.iter().map(String::as_str).collect();
+                                let pending: Vec<String> = batch.iter()
+                                    .filter(|b| !accepted_set.contains(b.id.as_str()))
+                                    .map(|b| b.id.clone()).collect();
+                                if !pending.is_empty() {
+                                    failures = failures.saturating_add(1);
+                                    let _ = db::bump_outbox_attempts(&pending);
+                                }
                                 // Ingest pull: upsert catalog detail, then delete
                                 // locals the owner removed (product_ids = full list).
-                                if let Some(products) = body.get("products").and_then(|p| p.as_array()) {
+                                // Remote stock is only authoritative once every
+                                // completed local sale has been acknowledged.
+                                // Otherwise a pull could restore sold units.
+                                let catalog_safe = db::unsynced_sales_count().map(|n| n == 0).unwrap_or(false);
+                                if let Some(products) = body.get("products").and_then(|p| p.as_array()).filter(|_| catalog_safe) {
                                     for p in products {
                                         let _ = db::upsert_product(
                                             p["id"].as_str().unwrap_or_default(),
@@ -141,7 +158,7 @@ mod inner {
                                         );
                                     }
                                 }
-                                if let Some(id_list) = body.get("product_ids").and_then(|p| p.as_array()) {
+                                if let Some(id_list) = body.get("product_ids").and_then(|p| p.as_array()).filter(|_| catalog_safe) {
                                     let present: HashSet<String> = id_list
                                         .iter()
                                         .filter_map(|v| v.as_str().map(str::to_string))
@@ -204,14 +221,12 @@ mod inner {
                                 failures = failures.saturating_add(1);
                                 let ids: Vec<String> = batch.iter().map(|b| b.id.clone()).collect();
                                 let _ = db::bump_outbox_attempts(&ids);
-                                let _ = db::drop_outbox_dead(OUTBOX_DLQ_ATTEMPTS);
                             }
                         }
                         Err(_) => {
                             failures = failures.saturating_add(1);
                             let ids: Vec<String> = batch.iter().map(|b| b.id.clone()).collect();
                             let _ = db::bump_outbox_attempts(&ids);
-                            let _ = db::drop_outbox_dead(OUTBOX_DLQ_ATTEMPTS);
                         }
                     }
                 }

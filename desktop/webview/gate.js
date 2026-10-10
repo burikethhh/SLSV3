@@ -629,6 +629,11 @@ async function admit(memberId, score, optionalName) {
       playChime("deny");
       return;
     }
+    if (result === "unlicensed") {
+      showHint("LICENSE INACTIVE — Activate GymPOS in Settings", "#ff6b6b");
+      playChime("deny");
+      return;
+    }
     if (result === "cooldown") {
       showHint("Already checked in — 5s Anti-Passback", "#ffd166");
       playChime("deny");

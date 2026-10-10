@@ -14,6 +14,7 @@ alter table gyms add column if not exists approved_at timestamptz;
 
 -- 2) Licenses: track license type ('trial', 'production')
 alter table licenses add column if not exists is_trial boolean not null default false;
+grant select (is_trial) on licenses to authenticated;
 
 -- 3) Allow CEO to view and update gym status across all branches
 drop policy if exists "ceo manage gyms" on gyms;

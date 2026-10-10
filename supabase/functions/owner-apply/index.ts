@@ -104,8 +104,12 @@ serve(async (req) => {
     }
   }
 
-  if (token) {
-    await supa.from("licenses").insert({
+  if (!token) {
+    await supa.from("gyms").delete().eq("id", gym.id);
+    return new Response("Trial license provisioning failed", { status: 500 });
+  }
+
+  const { error: licenseErr } = await supa.from("licenses").insert({
       id: licenseId,
       gym_id: gym.id,
       raw_token: token,
@@ -118,17 +122,28 @@ serve(async (req) => {
       days_valid: trialDays,
       is_trial: true,
     });
+  if (licenseErr) {
+    await supa.from("gyms").delete().eq("id", gym.id);
+    console.error("trial license insert failed", licenseErr.message);
+    return new Response("Trial license provisioning failed", { status: 500 });
   }
 
   // 3. Upgrade user's app_metadata to 'owner' with their new gym_id
-  await supa.auth.admin.updateUserById(user.id, {
+  const { error: authErr } = await supa.auth.admin.updateUserById(user.id, {
     app_metadata: {
+      ...user.app_metadata,
       role: "owner",
       gym_ids: [gym.id],
       status: "pending_approval",
       gym_name: gym.name,
     },
   });
+  if (authErr) {
+    await supa.from("licenses").delete().eq("id", licenseId);
+    await supa.from("gyms").delete().eq("id", gym.id);
+    console.error("owner metadata update failed", authErr.message);
+    return new Response("Application provisioning failed", { status: 500 });
+  }
 
   // 4. Audit trail
   await supa.from("audit_logs").insert({

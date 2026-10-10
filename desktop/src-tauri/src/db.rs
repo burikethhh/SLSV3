@@ -427,7 +427,7 @@ pub struct OutboxItem {
 pub fn take_outbox(limit: u32) -> rusqlite::Result<Vec<OutboxItem>> {
     let db = conn().lock().unwrap();
     let mut st = db.prepare(
-        "SELECT id, op, payload, attempts, created_at FROM outbox ORDER BY created_at LIMIT ?1",
+        "SELECT id, op, payload, attempts, created_at FROM outbox WHERE attempts < 10 ORDER BY created_at LIMIT ?1",
     )?;
     let rows = st.query_map(params![limit], |r| {
         Ok(OutboxItem {
@@ -462,27 +462,23 @@ pub fn bump_outbox_attempts(ids: &[String]) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Dead-letter: drop rows that kept failing past `max_attempts` so one
-/// poisoned row can't wedge the queue forever. Count lands in the
-/// `sync_dropped` setting (surfaced in Settings).
-pub fn drop_outbox_dead(max_attempts: u32) -> rusqlite::Result<u32> {
-    let db = conn().lock().unwrap();
-    let n = db.execute("DELETE FROM outbox WHERE attempts >= ?1", params![max_attempts])? as u32;
-    if n > 0 {
-        db.execute(
-            "INSERT INTO settings(key, value) VALUES('sync_dropped', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + CAST(?1 AS INTEGER) AS TEXT)",
-            params![n.to_string()],
-        )?;
-    }
-    Ok(n)
-}
-
 /// Cheap COUNT for the status bar — sync_pending must not pull full payloads
 /// (member rows carry 512-float face vectors) just to show "3 pending sync".
 pub fn outbox_count() -> rusqlite::Result<u32> {
     let db = conn().lock().unwrap();
     let n: i64 = db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0))?;
+    Ok(n as u32)
+}
+
+pub fn outbox_quarantined_count() -> rusqlite::Result<u32> {
+    let db = conn().lock().unwrap();
+    let n: i64 = db.query_row("SELECT COUNT(*) FROM outbox WHERE attempts >= 10", [], |r| r.get(0))?;
+    Ok(n as u32)
+}
+
+pub fn unsynced_sales_count() -> rusqlite::Result<u32> {
+    let db = conn().lock().unwrap();
+    let n: i64 = db.query_row("SELECT COUNT(*) FROM outbox WHERE op='sale'", [], |r| r.get(0))?;
     Ok(n as u32)
 }
 
@@ -680,12 +676,39 @@ pub fn reconcile_products(present: &[String]) -> rusqlite::Result<u32> {
 /// the `sync` Edge Fn shape (`id`, `items_json`, `total_cents`, `pay_method`,
 /// `created_at`). Outbox id == sale id — server upserts, retries can't dup.
 pub fn record_sale(id: &str, items_json: &str, total_cents: i64, pay_method: &str) -> rusqlite::Result<()> {
-    let db = conn().lock().unwrap();
-    db.execute(
+    let mut db = conn().lock().unwrap();
+    let tx = db.transaction()?;
+    let items: Vec<serde_json::Value> = serde_json::from_str(items_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if items.is_empty() || total_cents <= 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut verified_total = 0_i64;
+    for item in &items {
+        let product_id = item.get("product_id").and_then(|v| v.as_str()).ok_or(rusqlite::Error::InvalidQuery)?;
+        let qty = item.get("qty").and_then(|v| v.as_i64()).filter(|q| *q > 0).ok_or(rusqlite::Error::InvalidQuery)?;
+        let price = item.get("unit_cents").and_then(|v| v.as_i64()).filter(|p| *p >= 0).ok_or(rusqlite::Error::InvalidQuery)?;
+        let discount = item.get("discount_cents").and_then(|v| v.as_i64()).filter(|d| *d >= 0).ok_or(rusqlite::Error::InvalidQuery)?;
+        let gross = price.checked_mul(qty).ok_or(rusqlite::Error::InvalidQuery)?;
+        if discount > gross {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        verified_total = verified_total.checked_add(gross - discount).ok_or(rusqlite::Error::InvalidQuery)?;
+        let changed = tx.execute(
+            "UPDATE products SET stock = stock - ?1 WHERE id = ?2 AND price_cents = ?3 AND stock >= ?1",
+            params![qty, product_id, price],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    if verified_total != total_cents {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    tx.execute(
         "INSERT INTO sales(id, items_json, total_cents, pay_method) VALUES(?1,?2,?3,?4)",
         params![id, items_json, total_cents, pay_method],
     )?;
-    let created_at: String = db
+    let created_at: String = tx
         .query_row("SELECT created_at FROM sales WHERE id=?1", params![id], |r| r.get(0))
         .unwrap_or_else(|_| "1970-01-01 00:00:00".into());
     let payload = serde_json::json!({
@@ -696,11 +719,12 @@ pub fn record_sale(id: &str, items_json: &str, total_cents: i64, pay_method: &st
         "created_at": created_at,
     })
     .to_string();
-    db.execute(
+    tx.execute(
         "INSERT INTO outbox(id, op, payload) VALUES(?1,'sale',?2)
          ON CONFLICT(id) DO NOTHING",
         params![id, payload],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -931,6 +955,7 @@ mod tests {
     #[test]
     fn sale_outbox_is_idempotent_on_sale_id() {
         setup();
+        upsert_product("p1", "Test product", 100, 2).expect("seed product");
         let id = uuid::Uuid::new_v4().to_string();
         let items = r#"[{"product_id":"p1","unit_cents":100,"qty":2,"discount_cents":0}]"#;
         record_sale(&id, items, 200, "cash").expect("record_sale");
@@ -944,22 +969,32 @@ mod tests {
     }
 
     #[test]
-    fn dlq_drops_rows_past_cap_and_counts() {
+    fn sale_rejects_stale_price_without_changing_stock() {
+        setup();
+        let product_id = uuid::Uuid::new_v4().to_string();
+        upsert_product(&product_id, "Price check", 250, 3).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let items = format!(r#"[{{"product_id":"{product_id}","unit_cents":100,"qty":1,"discount_cents":0}}]"#);
+        assert!(record_sale(&id, &items, 100, "cash").is_err());
+        let row = product_search(&product_id).unwrap().into_iter().find(|p| p.id == product_id).unwrap();
+        assert_eq!(row.stock, 3);
+    }
+
+    #[test]
+    fn failed_rows_are_quarantined_without_deletion() {
         setup();
         let member = uuid::Uuid::new_v4().to_string();
         let att_id = log_checkin(&member, 0.42).expect("log_checkin");
         for _ in 0..10 {
             bump_outbox_attempts(&[att_id.clone()]).unwrap();
         }
-        let dropped = drop_outbox_dead(10).expect("dlq");
-        assert!(dropped >= 1);
-        assert!(outbox_row(&att_id).is_none(), "dead row must be gone");
-        let counter: u64 = get_setting("sync_dropped")
-            .unwrap()
-            .unwrap_or_else(|| "0".into())
-            .parse()
-            .unwrap();
-        assert!(counter >= 1);
+        assert!(outbox_row(&att_id).is_none(), "quarantined row must not block sync");
+        assert!(outbox_quarantined_count().unwrap() >= 1);
+        let db = conn().lock().unwrap();
+        let still_stored: i64 = db.query_row("SELECT COUNT(*) FROM outbox WHERE id=?1", params![att_id], |r| r.get(0)).unwrap();
+        assert_eq!(still_stored, 1, "quarantined row must remain recoverable");
+        drop(db);
+        clear_outbox(&[att_id]).unwrap();
     }
 
     #[test]

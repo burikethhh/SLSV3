@@ -17,31 +17,12 @@ serve(async (req) => {
   const { data: { user } } = await supa.auth.getUser(jwt);
   if (!user) return new Response("auth required", { status: 401 });
 
-  // Does a CEO already exist? Page through users checking app_metadata.
-  let page = 1;
-  let ceoExists = false;
-  for (;;) {
-    const { data, error } = await supa.auth.admin.listUsers({ page, perPage: 100 });
-    if (error) {
-      console.error("listUsers", error.message);
-      return new Response("bootstrap failed", { status: 500 });
-    }
-    if (data.users.some((u) => (u.app_metadata as { role?: string })?.role === "ceo")) {
-      ceoExists = true;
-      break;
-    }
-    if (data.users.length < 100) break;
-    page++;
-  }
-  if (ceoExists) return new Response("ceo already exists", { status: 403 });
-
-  const { error } = await supa.auth.admin.updateUserById(user.id, {
-    app_metadata: { ...user.app_metadata, role: "ceo", gym_ids: [] },
-  });
+  const { data: claimed, error } = await supa.rpc("claim_first_ceo", { target_user: user.id });
   if (error) {
     console.error("grant ceo", error.message);
     return new Response("bootstrap failed", { status: 500 });
   }
+  if (!claimed) return new Response("ceo already exists", { status: 403 });
 
   const { error: auditErr } = await supa.from("audit_logs").insert({
     actor: user.email ?? "ceo",

@@ -50,7 +50,7 @@ export function initPos() {
                     : `<span class="stock-badge instock">${r.stock} in Stock</span>`;
                 const isDisabled = r.stock <= 0;
                 return (
-                  `<button class="tile${isDisabled ? " disabled" : ""}" data-id="${r.id}" data-name="${esc(r.name)}" data-price="${r.price_cents}" ${isDisabled ? "disabled" : ""}>` +
+                  `<button class="tile${isDisabled ? " disabled" : ""}" data-id="${r.id}" data-name="${esc(r.name)}" data-price="${r.price_cents}" data-stock="${r.stock}" ${isDisabled ? "disabled" : ""}>` +
                   `<div class="tile-top"><span class="tile-category">Item</span>${stockBadge}</div>` +
                   `<span class="tile-name">${esc(r.name)}</span>` +
                   `<div class="tile-bottom">` +
@@ -64,7 +64,7 @@ export function initPos() {
 
         grid.querySelectorAll(".tile:not(.disabled)").forEach((t) =>
           t.addEventListener("click", () => {
-            addToCart(t.dataset.id, t.dataset.name, Number(t.dataset.price));
+            addToCart(t.dataset.id, t.dataset.name, Number(t.dataset.price), Number(t.dataset.stock));
           }),
         );
       } catch (e) {
@@ -75,8 +75,9 @@ export function initPos() {
   input.dispatchEvent(new Event("input"));
 }
 
-function addToCart(id, name, price) {
-  const line = cart.get(id) || { name, unit_cents: price, qty: 0 };
+function addToCart(id, name, price, stock) {
+  const line = cart.get(id) || { name, unit_cents: price, qty: 0, stock };
+  if (line.qty >= line.stock) return;
   line.qty += 1;
   cart.set(id, line);
   renderCart();
@@ -85,6 +86,7 @@ function addToCart(id, name, price) {
 function changeQty(id, delta) {
   const line = cart.get(id);
   if (!line) return;
+  if (delta > 0 && line.qty >= line.stock) return;
   line.qty += delta;
   if (line.qty <= 0) {
     cart.delete(id);

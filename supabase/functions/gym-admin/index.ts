@@ -64,6 +64,7 @@ serve(async (req) => {
       .maybeSingle();
 
     if (findErr || !gym) return new Response("gym not found", { status: 404 });
+    if (gym.status !== "pending") return new Response("application is not pending", { status: 409 });
 
     const now = new Date();
     const days = 30; // 30 days subscription countdown starts from verification
@@ -72,12 +73,16 @@ serve(async (req) => {
     const price = TIERS[tier].usd;
 
     // 1. Mark gym status as active and approved_at = now
-    const { error: upErr } = await supa
+    const { data: approvedGym, error: upErr } = await supa
       .from("gyms")
       .update({ status: "active", approved_at: now.toISOString() })
-      .eq("id", gym_id);
+      .eq("id", gym_id)
+      .eq("status", "pending")
+      .select("id")
+      .maybeSingle();
 
     if (upErr) return new Response("failed to update gym status", { status: 500 });
+    if (!approvedGym) return new Response("application was already processed", { status: 409 });
 
     // 2. Generate official 30-day production license
     const licenseId = crypto.randomUUID();
@@ -110,8 +115,12 @@ serve(async (req) => {
       }
     }
 
-    if (token) {
-      await supa.from("licenses").insert({
+    if (!token) {
+      await supa.from("gyms").update({ status: "pending", approved_at: null }).eq("id", gym_id);
+      return new Response("Production license signing failed", { status: 500 });
+    }
+
+    const { error: licenseErr } = await supa.from("licenses").insert({
         id: licenseId,
         gym_id: gym.id,
         raw_token: token,
@@ -124,21 +133,36 @@ serve(async (req) => {
         days_valid: days,
         is_trial: false,
       });
+    if (licenseErr) {
+      console.error("production license insert failed", licenseErr.message);
+      await supa.from("gyms").update({ status: "pending", approved_at: null }).eq("id", gym_id);
+      return new Response("Production license provisioning failed", { status: 500 });
     }
 
     // 3. Update owner's auth user status to 'verified'
     if (gym.owner_email) {
-      const { data: usersData } = await supa.auth.admin.listUsers();
+      const { data: usersData } = await supa.auth.admin.listUsers({ page: 1, perPage: 1000 });
       const targetUser = (usersData?.users ?? []).find((u) => u.email?.toLowerCase() === gym.owner_email.toLowerCase());
       if (targetUser) {
-        await supa.auth.admin.updateUserById(targetUser.id, {
+        const { error: authErr } = await supa.auth.admin.updateUserById(targetUser.id, {
           app_metadata: {
+            ...targetUser.app_metadata,
             role: "owner",
             gym_ids: [gym.id],
             status: "verified",
             subscription_expires_at: exp.toISOString(),
           },
         });
+        if (authErr) {
+          await supa.from("licenses").delete().eq("id", licenseId);
+          await supa.from("gyms").update({ status: "pending", approved_at: null }).eq("id", gym_id);
+          console.error("owner verification update failed", authErr.message);
+          return new Response("Owner verification failed", { status: 500 });
+        }
+      } else {
+        await supa.from("licenses").delete().eq("id", licenseId);
+        await supa.from("gyms").update({ status: "pending", approved_at: null }).eq("id", gym_id);
+        return new Response("Owner account not found", { status: 500 });
       }
     }
 

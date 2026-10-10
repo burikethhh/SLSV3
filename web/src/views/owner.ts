@@ -334,7 +334,7 @@ async function overview(root: HTMLElement, s: Session, token: number) {
 async function keys(root: HTMLElement, s: Session) {
   const [{ data: gyms }, { data, error }] = await Promise.all([
     db().from("gyms").select("id,name,tier,disabled,status").order("name"),
-    scope(db().from("licenses").select("id,gym_id,revoked,expires_at,created_at,tier,price_usd,days_valid,is_trial,raw_token").order("created_at", { ascending: false }), s),
+    scope(db().from("licenses").select("id,gym_id,revoked,expires_at,created_at,tier,price_usd,days_valid,is_trial").order("created_at", { ascending: false }), s),
   ]);
   const gym = (id: string) => gyms?.find((g) => g.id === id);
   const now = Date.now();
@@ -418,10 +418,6 @@ async function keys(root: HTMLElement, s: Session) {
         countText = "Expired";
       }
 
-      const copyBtn = l.raw_token
-        ? `<button data-copy-key="${esc(l.raw_token)}" style="padding:3px 8px;font-size:11px">Copy Key</button>`
-        : "—";
-
       return `<tr>
         <td><strong>${esc(g?.name ?? l.gym_id.slice(0, 8) + "…")}</strong></td>
         <td>${l.is_trial ? '<span class="stat-badge badge-basic">14-day trial</span>' : '<span class="stat-badge badge-pro">subscription</span>'}</td>
@@ -430,20 +426,10 @@ async function keys(root: HTMLElement, s: Session) {
         <td>${new Date(l.expires_at).toLocaleDateString()}</td>
         <td style="font-weight:600;font-size:12px">${countText}</td>
         <td>${statusBadge}</td>
-        <td>${copyBtn}</td></tr>`;
+        <td>Cloud sign-in</td></tr>`;
     }).join("") || `<tr><td colspan="8" class="muted">No keys for your gyms yet — submit an application or ask CEO.</td></tr>`}
     </tbody></table>`;
 
-  root.querySelectorAll("[data-copy-key]").forEach((btn) => {
-    (btn as HTMLButtonElement).onclick = () => {
-      const key = (btn as HTMLElement).dataset.copyKey;
-      if (key) {
-        navigator.clipboard?.writeText(key);
-        (btn as HTMLButtonElement).textContent = "Copied!";
-        setTimeout(() => { (btn as HTMLButtonElement).textContent = "Copy Key"; }, 2000);
-      }
-    };
-  });
 }
 
 async function catalog(root: HTMLElement, s: Session, token: number) {

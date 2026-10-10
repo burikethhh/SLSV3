@@ -43,8 +43,9 @@ Each entry: what was kept verbatim-adapted, what was slimmed/dropped, and why.
 3. ~~Sync ingest~~ — done: `sync` Edge Fn is idempotent (upserts by client uuid + offline
    `created_at`, caps 500/512KiB, fail-closed kill-switch on missing rows, rate-limited) and pulls
    `products` + `product_ids` (delete-reconcile) + `staff` (terminal PIN cache). Desktop
-   `sync_worker` (feature `cloud-sync`): backoff/idle-poll, exits on revoke, DLQ at 10 attempts
-   (`sync_dropped` setting), heartbeat only on 2xx (7-day boot enforcement).
+   `sync_worker` (feature `cloud-sync`): backoff/idle-poll, exits on revoke, per-row
+   acknowledgements; failed rows quarantine locally after 10 attempts (never silently deleted).
+   Heartbeat only on 2xx (7-day boot enforcement).
 4. Collect gym faces → tune EdgeFace threshold from 0.40 (never reuse SFace 0.62); re-add HNSW/adapt only with data.
 5. Updater signature: paste CI minisign `.sig` into the Releases dashboard row — `updates-check`
    returns it as `signature` (desktop `update_check` shows the download link today; full
@@ -102,9 +103,12 @@ deployed flag (happened to `user-admin` on 09-27; re-patch with the API snippet 
 # Redeploy later (already logged in + linked)
 $sa = "$env:APPDATA\npm\supabase.cmd"
 & $sa db push
-foreach ($fn in @('sync','updates-check','license-issue','license-verify','license-revoke','gym-admin','user-admin','staff-create','bootstrap-ceo')) {
+foreach ($fn in @('sync','updates-check','license-issue','license-verify','license-revoke','license-fetch','owner-apply','gym-admin','user-admin','staff-create','bootstrap-ceo')) {
   & $sa functions deploy $fn
 }
+# Apply migrations 0010–0012 and deploy the new sync Edge Function before
+# distributing the updated GymPOS exe. Old sync responses lack accepted_ids;
+# updated terminals deliberately retain their outbox until server deploy.
 # deploy resets verify_jwt=true — re-patch the two public fns (terminals get 401 otherwise):
 # foreach ($fn in @('sync','updates-check')) {
 #   Invoke-RestMethod -Method Patch "https://api.supabase.com/v1/projects/tlfytevjhzcgrttcdipq/functions/$fn" `
@@ -163,16 +167,14 @@ Check → Download & install → Restart. Offline failures only log.
   and the pinned `ceo.e2e.1790267997223` / `owner.e2e.1790507038514` accounts
   (e2e-desktop resets the CEO pw each run — keep them in sync).
 
-## Domain `keth.website` — Vercel DNS (2026-09-28)
-Bought via Vercel (registrar+NS = Vercel, `ns1/ns2.vercel-dns.com`, expires 2027-09-28).
-The zone lives in **Domains → dashboard**, records also via `vercel dns add`. Bound to
-project `sls-v3-web`: apex + `sls.` + `www.` — all three verified `configured_correctly`:
+## Domain `sls.keth.website` — Vercel DNS (2026-09-28)
+The SLS dashboard is bound only to `sls.keth.website` and the Vercel deployment URL.
+The apex `keth.website` and `www.keth.website` belong exclusively to the personal portfolio
+and must never be added to this project:
 ```powershell
 $vc = "$env:APPDATA\npm\vercel.cmd"
 Set-Location B:\Projects\SoloLeveling\web
-& $vc domains add keth.website sls-v3-web        # apex (Vercel auto-creates A records)
 & $vc domains add sls.keth.website sls-v3-web    # canonical app URL
-& $vc domains add www.keth.website sls-v3-web
 # future projects: & $vc domains add <sub>.keth.website <project-name>
 ```
 - Supabase auth now: `site_url=https://sls.keth.website` (+ old vercel alias & `http://localhost:5173/*` allowed).

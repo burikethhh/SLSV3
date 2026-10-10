@@ -114,6 +114,8 @@ serve(async (req) => {
   }
 
   // Members first (same batch) so attendance.member_id FK resolves.
+  const acceptedIds: string[] = [];
+  const failedIds: string[] = [];
   for (const m of members) {
     const id = asUuid((m as Record<string, unknown>)?.id);
     if (!id) continue;
@@ -131,18 +133,17 @@ serve(async (req) => {
     );
     if (error) {
       console.error("member upsert", error.message);
-      return Response.json({ remote_disabled: false, error: "member upsert failed" }, { status: 502 });
-    }
+      failedIds.push(id);
+    } else acceptedIds.push(id);
   }
 
-  let skipped = 0;
-  const writes: Promise<unknown>[] = [];
+  const writes: { id: string; result: PromiseLike<{ error: { message: string } | null }> }[] = [];
 
   for (const raw of attendance) {
     const a = (raw ?? {}) as Record<string, unknown>;
     const id = asUuid(a.id);
-    if (!id) { skipped++; continue; } // no client id = can't dedupe retries
-    writes.push(
+    if (!id) continue; // no client id = can't dedupe retries
+    writes.push({ id, result:
       supa.from("attendance").upsert(
         {
           id,
@@ -154,61 +155,67 @@ serve(async (req) => {
         },
         { onConflict: "id" },
       ),
-    );
+    });
   }
   for (const raw of sales) {
     const s = (raw ?? {}) as Record<string, unknown>;
     const id = asUuid(s.id);
-    if (!id) { skipped++; continue; }
+    if (!id) continue;
     let items: unknown;
     try {
       items = typeof s.items_json === "string" ? JSON.parse(s.items_json) : s.items;
     } catch {
-      skipped++;
+      failedIds.push(id);
       continue;
     }
     // Fix 2: recompute the total from line items — a stolen license token
     // could previously push any peso figure and the dashboard reported it.
-    // Unknown/negative lines are dropped; a >1-peso mismatch is rejected.
+    // Reject the entire sale if any line is invalid: dropping just one line
+    // would silently alter the cashier's completed transaction.
     const lines = Array.isArray(items) ? items : [];
     const cleanLines: { product_id: string | null; qty: number; unit_cents: number; discount_cents?: number }[] = [];
+    let invalidLine = false;
     for (const it of lines) {
       const r = (it ?? {}) as Record<string, unknown>;
-      const qty = Math.floor(Number(r.qty ?? 0));
-      const unit = Math.floor(Number(r.unit_cents ?? 0));
-      if (!Number.isFinite(qty) || !Number.isFinite(unit) || qty <= 0 || unit < 0) continue;
-      if (qty > 999 || unit > 100_000_00) continue; // sanity caps per line
-      const rawDiscount = Math.floor(Number(r.discount_cents ?? 0));
-      const discount = Number.isFinite(rawDiscount) && rawDiscount > 0 ? Math.min(qty * unit, rawDiscount) : 0;
+      const qty = Number(r.qty ?? 0);
+      const unit = Number(r.unit_cents ?? 0);
+      if (!Number.isSafeInteger(qty) || !Number.isSafeInteger(unit) || qty <= 0 || unit < 0 || !asUuid(r.product_id)) {
+        invalidLine = true;
+        break;
+      }
+      if (qty > 999 || unit > 100_000_00) { invalidLine = true; break; } // sanity caps per line
+      const rawDiscount = Number(r.discount_cents ?? 0);
+      if (!Number.isSafeInteger(rawDiscount) || rawDiscount < 0 || rawDiscount > qty * unit) {
+        invalidLine = true;
+        break;
+      }
+      const discount = rawDiscount;
       cleanLines.push({ product_id: asUuid(r.product_id), qty, unit_cents: unit, discount_cents: discount });
     }
-    if (!cleanLines.length) { skipped++; continue; }
+    if (invalidLine || !cleanLines.length) { failedIds.push(id); continue; }
     const computed = cleanLines.reduce((a, l) => a + Math.max(0, l.qty * l.unit_cents - (l.discount_cents ?? 0)), 0);
-    const claimed = Math.floor(Number(s.total_cents ?? NaN));
-    // Tolerate sub-peso rounding from old terminals, reject anything bigger.
-    if (!Number.isFinite(claimed) || claimed < 0 || Math.abs(claimed - computed) > 100) {
-      skipped++;
+    const claimed = Number(s.total_cents ?? NaN);
+    if (!Number.isSafeInteger(claimed) || claimed <= 0 || claimed !== computed) {
+      failedIds.push(id);
       continue;
     }
-    writes.push(
-      supa.from("sales").upsert(
-        {
-          id,
-          gym_id: gymId,
-          items: cleanLines,
-          total_cents: computed,
-          pay_method: asPayMethod(s.pay_method),
-          created_at: typeof s.created_at === "string" && s.created_at ? s.created_at : new Date().toISOString(),
-        },
-        { onConflict: "id" },
-      ),
-    );
+    writes.push({ id, result:
+      supa.rpc("record_sale_and_decrement_stock", {
+        p_sale_id: id,
+        p_gym_id: gymId,
+        p_items: cleanLines,
+        p_total_cents: computed,
+        p_pay_method: asPayMethod(s.pay_method),
+        p_created_at: typeof s.created_at === "string" && s.created_at ? s.created_at : new Date().toISOString(),
+      }),
+    });
   }
-  const results = await Promise.all(writes);
-  const failures = results.filter((r) => (r as { error?: unknown }).error);
-  if (failures.length) {
-    for (const f of failures.slice(0, 3)) console.error("push insert", (f as { error?: { message?: string } }).error?.message);
-    return Response.json({ remote_disabled: false, error: "insert failed", count: failures.length }, { status: 502 });
+  const results = await Promise.all(writes.map((write) => write.result));
+  for (let i = 0; i < results.length; i++) {
+    if (results[i].error) {
+      console.error("push insert", results[i].error?.message);
+      failedIds.push(writes[i].id);
+    } else acceptedIds.push(writes[i].id);
   }
 
   // Pull side: catalog for this gym (owner edits land on terminal next poll).
@@ -235,7 +242,8 @@ serve(async (req) => {
     staff: staff.data ?? [],
     promos: promos.data ?? [],
     members: membersList.data ?? [],
-    skipped,
+    accepted_ids: acceptedIds,
+    failed_ids: failedIds,
     server_time: Date.now(),
   });
 });

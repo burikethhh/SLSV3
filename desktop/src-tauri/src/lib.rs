@@ -15,10 +15,37 @@ pub mod sync_worker;
 use face_store::FaceStore;
 use sls_core::pos::{checkout, CartLine, PayMethod};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::Manager;
+
+static STAFF_ROLE: OnceLock<parking_lot::RwLock<Option<String>>> = OnceLock::new();
+static GATE_UNLOCK_TICKET: OnceLock<parking_lot::Mutex<Option<Instant>>> = OnceLock::new();
+
+fn staff_role() -> &'static parking_lot::RwLock<Option<String>> {
+    STAFF_ROLE.get_or_init(|| parking_lot::RwLock::new(None))
+}
+
+fn gate_unlock_ticket() -> &'static parking_lot::Mutex<Option<Instant>> {
+    GATE_UNLOCK_TICKET.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+fn successful_checkin(result: &str) -> bool {
+    uuid::Uuid::parse_str(result).is_ok()
+}
+
+fn require_privileged_terminal_session() -> Result<(), String> {
+    let locked = db::staff_locked().map_err(|e| e.to_string())?;
+    if locked && staff_role().read().is_none() {
+        return Err("staff PIN required".into());
+    }
+    Ok(())
+}
 
 #[tauri::command(rename_all = "snake_case")]
 fn pos_checkout(lines: Vec<CartLineDto>, tendered_cents: i64, method: String) -> Result<(i64, i64), String> {
+    if !license_mgr().current_status().is_operable() {
+        return Err("license inactive".into());
+    }
     let pay = match method.as_str() {
         "card" => PayMethod::Card,
         "gcash" => PayMethod::Gcash,
@@ -52,7 +79,14 @@ struct CartLineDto {
 
 #[tauri::command(rename_all = "snake_case")]
 fn gate_checkin(member_id: String, confidence: f32) -> Result<String, String> {
-    db::log_checkin(&member_id, confidence).map_err(|e| e.to_string())
+    if !license_mgr().current_status().is_operable() {
+        return Ok("unlicensed".into());
+    }
+    let result = db::log_checkin(&member_id, confidence).map_err(|e| e.to_string())?;
+    if successful_checkin(&result) {
+        *gate_unlock_ticket().lock() = Some(Instant::now() + Duration::from_secs(5));
+    }
+    Ok(result)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -147,6 +181,7 @@ fn sync_pending() -> Result<u32, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 fn face_enroll(member_id: String, full_name: String, embedding: Vec<f32>) -> Result<String, String> {
+    require_privileged_terminal_session()?;
     // v3 FaceStore is EdgeFace 512-d only (legacy 128-d rows are skipped on load).
     if embedding.len() != 512 {
         return Err(format!("expected 512-d EdgeFace embedding, got {}", embedding.len()));
@@ -189,6 +224,15 @@ fn face_store() -> &'static parking_lot::RwLock<FaceStore> {
 
 #[tauri::command(rename_all = "snake_case")]
 fn license_apply(token: String, supabase_url: Option<String>) -> Result<String, String> {
+    require_privileged_terminal_session()?;
+    let url = supabase_url
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| db::get_setting("supabase_url").ok().flatten());
+    if let Some(ref url) = url {
+        if !allowed_supabase_url(url) {
+            return Err("unsupported Supabase URL".into());
+        }
+    }
     let mgr = license_mgr();
     let status = mgr.verify_and_apply(&token)?;
     let claims = mgr.current_claims().ok_or("license not active")?;
@@ -197,9 +241,6 @@ fn license_apply(token: String, supabase_url: Option<String>) -> Result<String, 
     // (recovery path when the 7-day window lapsed while offline).
     let _ = db::heartbeat_ok();
 
-    let url = supabase_url
-        .filter(|u| !u.trim().is_empty())
-        .or_else(|| db::get_setting("supabase_url").ok().flatten());
     if let Some(url) = url {
         let _ = db::set_setting("supabase_url", &url);
         #[cfg(feature = "cloud-sync")]
@@ -211,12 +252,53 @@ fn license_apply(token: String, supabase_url: Option<String>) -> Result<String, 
 
 #[tauri::command]
 fn settings_get(key: String) -> Result<Option<String>, String> {
+    if key == "sync_quarantined" {
+        return db::outbox_quarantined_count().map(|n| Some(n.to_string())).map_err(|e| e.to_string());
+    }
     db::get_setting(&key).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn settings_set(key: String, value: String) -> Result<(), String> {
+    require_privileged_terminal_session()?;
+    if key == "supabase_url" && !allowed_supabase_url(&value) {
+        return Err("unsupported Supabase URL".into());
+    }
     db::set_setting(&key, &value).map_err(|e| e.to_string())
+}
+
+fn allowed_supabase_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else { return false };
+    if !parsed.username().is_empty() || parsed.password().is_some()
+        || parsed.query().is_some() || parsed.fragment().is_some()
+        || parsed.path() != "/" { return false; }
+    match (parsed.scheme(), parsed.host_str(), parsed.port()) {
+        ("https", Some("tlfytevjhzcgrttcdipq.supabase.co"), None) => true,
+        ("http", Some("localhost" | "127.0.0.1"), Some(port)) => port > 0,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod terminal_guard_tests {
+    use super::*;
+
+    #[test]
+    fn only_persisted_checkins_authorize_gate_unlock() {
+        assert!(successful_checkin("550e8400-e29b-41d4-a716-446655440000"));
+        for rejected in ["ok", "cooldown", "expired", "frozen", "unlicensed"] {
+            assert!(!successful_checkin(rejected));
+        }
+    }
+
+    #[test]
+    fn supabase_url_must_match_host_exactly() {
+        assert!(allowed_supabase_url("https://tlfytevjhzcgrttcdipq.supabase.co"));
+        assert!(allowed_supabase_url("http://localhost:54321"));
+        assert!(!allowed_supabase_url("http://localhost:54321@evil.example"));
+        assert!(!allowed_supabase_url("https://tlfytevjhzcgrttcdipq.supabase.co.evil.example"));
+        assert!(!allowed_supabase_url("http://localhost:54321/redirect"));
+    }
 }
 
 // ── Terminal-PIN lock: Settings (license/config) unlocks with a staff PIN ─────
@@ -233,9 +315,11 @@ fn settings_lock_state() -> Result<bool, String> {
 /// Returns the staff role on success.
 #[tauri::command]
 fn staff_verify(username: String, pin: String) -> Result<String, String> {
-    db::staff_verify(&username, &pin)
+    let role = db::staff_verify(&username, &pin)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Invalid username or PIN".to_string())
+        .ok_or_else(|| "Invalid username or PIN".to_string())?;
+    *staff_role().write() = Some(role.clone());
+    Ok(role)
 }
 
 // ── Update check (updates-check Edge Fn; Settings shows a download link) ──────
@@ -411,6 +495,7 @@ fn license_mgr() -> Arc<license_verify::LicenseManager> {
 
 #[tauri::command(rename_all = "snake_case")]
 fn hw_manual_override(operator: Option<String>, duration_ms: Option<u32>) -> Result<String, String> {
+    require_privileged_terminal_session()?;
     let op = operator.as_deref().unwrap_or("Kiosk Staff Button");
     let _ = db::log_manual_override(Some(op));
     #[cfg(feature = "hardware-serial")]
@@ -427,12 +512,20 @@ fn hw_manual_override(operator: Option<String>, duration_ms: Option<u32>) -> Res
 #[cfg(feature = "hardware-serial")]
 #[tauri::command(rename_all = "snake_case")]
 fn hw_unlock(duration_ms: Option<u32>) -> Result<String, String> {
+    let allowed = gate_unlock_ticket().lock().take().map(|expires| Instant::now() <= expires).unwrap_or(false);
+    if !allowed {
+        return Err("gate unlock requires a successful licensed check-in".into());
+    }
     hw().unlock_door(duration_ms.unwrap_or(3000))
 }
 
 #[cfg(not(feature = "hardware-serial"))]
 #[tauri::command(rename_all = "snake_case")]
 fn hw_unlock(_duration_ms: Option<u32>) -> Result<String, String> {
+    let allowed = gate_unlock_ticket().lock().take().map(|expires| Instant::now() <= expires).unwrap_or(false);
+    if !allowed {
+        return Err("gate unlock requires a successful licensed check-in".into());
+    }
     Ok("unlocked (no hardware-serial)".into())
 }
 

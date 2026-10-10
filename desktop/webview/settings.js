@@ -187,6 +187,11 @@ async function bindActions() {
       msg.style.color = "#fbbf24";
       return;
     }
+    if (supabaseUrl !== DEFAULT_URL && !/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(supabaseUrl.replace(/\/$/, ""))) {
+      msg.textContent = "Unsupported cloud URL. Use the official SLS Supabase project.";
+      msg.style.color = "#ff6b6b";
+      return;
+    }
     msg.textContent = "Signing in with SLS Cloud…";
     msg.style.color = "#38bdf8";
 
@@ -206,15 +211,19 @@ async function bindActions() {
 
       msg.textContent = "Authenticated! Fetching assigned license key from cloud…";
 
-      // 2. Query license from Supabase with RLS
-      const licRes = await fetch(`${supabaseUrl}/rest/v1/licenses?select=id,gym_id,revoked,expires_at,tier,price_usd,is_trial,raw_token&order=created_at.desc&limit=5`, {
+      // 2. Fetch the token through the authenticated Edge Function. raw_token
+      // is intentionally not exposed through PostgREST grants.
+      const licRes = await fetch(`${supabaseUrl}/functions/v1/license-fetch`, {
+        method: "POST",
         headers: {
           apikey: SUPABASE_ANON_KEY,
           Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
         },
+        body: "{}",
       });
       if (!licRes.ok) throw new Error("Could not fetch licenses: " + (await licRes.text()));
-      const licenses = await licRes.json();
+      const licenses = (await licRes.json()).licenses;
       if (!licenses || licenses.length === 0) {
         throw new Error("No license key found for this account. If you just registered, your application is pending review or no gym is linked.");
       }
@@ -356,6 +365,7 @@ async function fillStatus(el) {
     const status = await invoke("license_status");
     const pending = await invoke("sync_pending");
     const dropped = await invoke("settings_get", { key: "sync_dropped" }).catch(() => null);
+    const quarantined = await invoke("settings_get", { key: "sync_quarantined" }).catch(() => null);
     const type = status?.type ?? "unknown";
     const t = String(type).toLowerCase();
     const color = t === "valid" ? "#3ddc97" : t === "graceperiod" ? "#ffd166" : "#ff6b6b";
@@ -370,7 +380,7 @@ async function fillStatus(el) {
     } else if (t === "expired") {
       label = "❌ expired (terminal locked)";
     }
-    const dlq = dropped ? ` · ${dropped} dropped (dead-letter)` : "";
+    const dlq = `${Number(quarantined) > 0 ? ` · ${quarantined} quarantined (needs recovery)` : ""}${Number(dropped) > 0 ? ` · ${dropped} previously dropped` : ""}`;
     el.innerHTML =
       `License: <strong style="color:${color}">${label}</strong>${detail}<br/>` +
       `Pending sync: ${pending}${dlq}`;
