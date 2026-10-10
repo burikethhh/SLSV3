@@ -56,7 +56,14 @@ async function refresh() {
 
     const type = String(status?.type ?? "unknown").toLowerCase();
     const tone = type === "valid" ? "badge-ultra" : type === "graceperiod" ? "warn" : "bad";
-    const label = type === "valid" ? "S · ULTRA (ACTIVE)" : type === "graceperiod" ? "GRACE PERIOD" : type;
+    let label = type === "valid" ? "S · ULTRA (ACTIVE)" : type === "graceperiod" ? "GRACE PERIOD" : type.toUpperCase();
+    if (type === "valid" && status?.days_remaining !== undefined) {
+      label = `S · ULTRA (${status.days_remaining}d remaining)`;
+    } else if (type === "graceperiod" && status?.grace_days_remaining !== undefined) {
+      label = `⚠️ GRACE PERIOD (${status.grace_days_remaining}d left)`;
+    } else if (type === "expired") {
+      label = "❌ EXPIRED (LOCKED)";
+    }
     const today = (sales ?? []).filter((s) => s.created_at?.startsWith("Today") || s.created_at?.startsWith(new Date().toISOString().slice(0, 10)));
     const todayTotal = today.reduce((a, s) => a + s.total_cents, 0);
 
