@@ -36,20 +36,25 @@ if(action==='backup') {
   const bytes=JSON.stringify(result.rows[0].snapshot,null,2);
   await writeFile(join(folder,'pre-migration.json'),bytes,{flag:'wx'});
   console.log(JSON.stringify({backup_folder:folder,sha256:createHash('sha256').update(bytes).digest('hex'),tables:tables.length,accounts:result.rows[0].snapshot.account_metadata.length}));
+} else if(action==='hold') {
+  const key=await serviceKey();
+  await request('/rest/v1/releases?version=eq.3.0.4&channel=eq.stable',key,{method:'PATCH',body:JSON.stringify({rollout_pct:0})});
+  console.log('PASS automatic 3.0.4 rollout held at 0%; immutable published artifact retained');
 } else if(action==='feed') {
-  if(process.env.SLS_PUBLISH_RELEASE!=='3.0.4') throw Error('Set SLS_PUBLISH_RELEASE=3.0.4 only after release checks and artifact upload');
-  const installer=join(root,'desktop/src-tauri/target/release/bundle/nsis/SLS v3_3.0.4_x64-setup.exe');
+  const version=process.env.SLS_PUBLISH_RELEASE;
+  if(version!=='3.0.5') throw Error('Set SLS_PUBLISH_RELEASE=3.0.5 only after release checks and artifact upload');
+  const installer=join(root,`desktop/src-tauri/target/release/bundle/nsis/SLS v3_${version}_x64-setup.exe`);
   const sig=(await readFile(installer+'.sig','utf8')).trim();
   const bytes=await readFile(installer), sha=createHash('sha256').update(bytes).digest('hex');
-  const url='https://github.com/burikethhh/SLSV3/releases/download/v3.0.4/SLS.v3_3.0.4_x64-setup.exe';
+  const url=`https://github.com/burikethhh/SLSV3/releases/download/v${version}/SLS.v3_${version}_x64-setup.exe`;
   const download=await fetch(url);
   if(!download.ok || createHash('sha256').update(Buffer.from(await download.arrayBuffer())).digest('hex')!==sha) throw Error('Published installer does not match verified local artifact');
   const key=await serviceKey();
-  const existing=await (await request('/rest/v1/releases?select=version&version=eq.3.0.4&channel=eq.stable',key)).json();
-  if(existing.length) throw Error('3.0.4 already published; do not overwrite a released artifact');
-  await request('/rest/v1/releases',key,{method:'POST',body:JSON.stringify({version:'3.0.4',channel:'stable',rollout_pct:100,download_url:url,sig,
-    notes:'Account-first owner activation; 14-day trial; CEO-confirmed 30-day paid subscription; native operator sessions; backed-up legacy recovery; full roster and plan sync; complete reports. Installer SHA256 '+sha})});
-  console.log('PASS published stable 3.0.4 feed with matching installer hash and signature');
+  const existing=await (await request(`/rest/v1/releases?select=version&version=eq.${version}&channel=eq.stable`,key)).json();
+  if(existing.length) throw Error('Version already published; do not overwrite a released artifact');
+  await request('/rest/v1/releases',key,{method:'POST',body:JSON.stringify({version,channel:'stable',rollout_pct:100,download_url:url,sig,
+    notes:'Account-first owner activation; 14-day trial; CEO-confirmed 30-day paid subscription; operator sessions; backed-up legacy recovery; complete roster/plans/reports; byte-bounded outbox recovery. Installer SHA256 '+sha})});
+  console.log(`PASS published stable ${version} feed with matching installer hash and signature`);
 } else if(action==='smoke') {
   const keys=JSON.parse(cli(`supabase projects api-keys --project-ref ${project} -o json`));
   const list=Array.isArray(keys)?keys:Object.values(keys).find(Array.isArray);
@@ -63,4 +68,18 @@ if(action==='backup') {
     body:JSON.stringify({p_actor:randomUUID(),p_target:randomUUID(),p_role:'ceo',p_gyms:[]})});
   if(![401,403,404].includes(role.status)) throw Error('Anonymous account-admin RPC not denied');
   console.log(`PASS anonymous account-admin RPC denied (${role.status})`);
+  const pem=await readFile(join(root,'supabase/RSA_PRIVATE_KEY_PEM.txt'),'utf8');
+  let token;
+  try {
+    token=execFileSync('deno',['eval','--no-config','--no-lock','--node-modules-dir=none',
+      "import {makeClaims,signEntitlement} from './supabase/functions/_shared/entitlement.ts'; console.log(await signEntitlement(makeClaims({id:crypto.randomUUID(),name:'Nonexistent smoke fixture',owner_email:'fixture@example.invalid'},crypto.randomUUID(),'pro',new Date(Date.now()+86400000))));"],
+      {cwd:root,encoding:'utf8',windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,RSA_PRIVATE_KEY_PEM:pem}}).trim();
+  } catch { throw Error('Offline signing fixture unavailable; private diagnostics withheld'); }
+  const verifier=await fetch(base+'/functions/v1/license-verify',{method:'POST',headers:{apikey:anon,Authorization:`Bearer ${anon}`,'Content-Type':'application/json'},body:JSON.stringify({token})});
+  const verified=await verifier.json();
+  if(verifier.status!==200 || verified.valid!==false || verified.reason!=='not_found') throw Error('Deployed RSA public-key verification failed or accepted a nonexistent license');
+  console.log('PASS deployed RSA verifier matches offline/native key pair and rejects nonexistent license');
+  const sync=await fetch(base+'/functions/v1/sync',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:'{}'});
+  if(sync.status!==200 || (await sync.json()).remote_disabled!==true) throw Error('Sync did not lock nonexistent facility/license');
+  console.log('PASS deployed sync denies signed nonexistent facility/license without writes');
 } else throw Error('Choose backup, feed, or smoke');

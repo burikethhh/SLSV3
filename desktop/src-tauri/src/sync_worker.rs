@@ -25,9 +25,51 @@ mod inner {
 
     /// Quarantine a failed outbox row after this many attempts.
     pub const OUTBOX_DLQ_ATTEMPTS: u32 = 10;
-    /// Mirror of the sync fn PRODUCT_IDS_CAP — at the cap the list may be
-    /// truncated, so reconcile must be skipped rather than delete real stock.
-    /// Mirror of the sync fn staff limit (100) — same truncated-list guard.
+    const PUSH_BODY_CAP: usize = 512 * 1024 - 1024;
+
+    // Count encoded UTF-8 bytes, not rows: 100 face vectors can exceed the
+    // server's 512 KiB limit. Deferred records keep their original IDs/attempts.
+    fn prepare_push(
+        batch: &[db::OutboxItem],
+        cursor: Option<String>,
+    ) -> (serde_json::Value, HashSet<String>, Vec<String>) {
+        let mut payload =
+            serde_json::json!({"face_since":cursor,"attendance":[],"sales":[],"members":[]});
+        let mut size = serde_json::to_vec(&payload).unwrap().len();
+        let base = size;
+        let mut included = HashSet::new();
+        let mut rejected = Vec::new();
+        for item in batch {
+            let field = match item.op.as_str() {
+                "attendance" => "attendance",
+                "sale" => "sales",
+                "member" => "members",
+                _ => {
+                    rejected.push(item.id.clone());
+                    continue;
+                }
+            };
+            let row = match serde_json::from_str::<serde_json::Value>(&item.payload) {
+                Ok(row) if row["id"].as_str() == Some(item.id.as_str()) => row,
+                _ => {
+                    rejected.push(item.id.clone());
+                    continue;
+                }
+            };
+            let bytes = serde_json::to_vec(&row).unwrap().len() + 1;
+            if base + bytes > PUSH_BODY_CAP {
+                rejected.push(item.id.clone());
+                continue;
+            }
+            if size + bytes > PUSH_BODY_CAP {
+                continue;
+            }
+            size += bytes;
+            payload[field].as_array_mut().unwrap().push(row);
+            included.insert(item.id.clone());
+        }
+        (payload, included, rejected)
+    }
 
     /// Backoff stage from consecutive failures (recycled 1:1 from orig).
     pub fn backoff_secs(consecutive_failures: u32) -> u64 {
@@ -77,7 +119,7 @@ mod inner {
                 loop {
                     tokio::time::sleep(Duration::from_secs(backoff_secs(failures))).await;
 
-                    let (has_bearer, batch, face_cursor) = {
+                    let (has_bearer, mut batch, face_cursor) = {
                         let _context = crate::terminal_context().read();
                         if self.generation != crate::sync_generation() {
                             return;
@@ -110,18 +152,17 @@ mod inner {
                         idle_ticks = 0;
                     }
 
-                    let payload = serde_json::json!({
-                        "face_since": face_cursor,
-                        "attendance": batch.iter().filter(|b| b.op == "attendance").map(|b| {
-                            serde_json::from_str::<serde_json::Value>(&b.payload).unwrap_or_default()
-                        }).collect::<Vec<_>>(),
-                        "sales": batch.iter().filter(|b| b.op == "sale").map(|b| {
-                            serde_json::from_str::<serde_json::Value>(&b.payload).unwrap_or_default()
-                        }).collect::<Vec<_>>(),
-                        "members": batch.iter().filter(|b| b.op == "member").map(|b| {
-                            serde_json::from_str::<serde_json::Value>(&b.payload).unwrap_or_default()
-                        }).collect::<Vec<_>>(),
-                    });
+                    let (payload, included, rejected) = prepare_push(&batch, face_cursor);
+                    if !rejected.is_empty() {
+                        let _context = crate::terminal_context().read();
+                        if self.generation != crate::sync_generation() {
+                            return;
+                        }
+                        // Local malformed/individually oversized rows are permanent
+                        // failures, not network failures; retain them for recovery.
+                        let _ = db::bump_outbox_attempts(&rejected);
+                    }
+                    batch.retain(|row| included.contains(&row.id));
 
                     let resp = client
                         .post(&endpoint)
@@ -342,6 +383,61 @@ mod inner {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn byte_bounded_face_batches_preserve_all_deferred_rows() {
+            let mut rows = Vec::new();
+            for _ in 0..100 {
+                let id = uuid::Uuid::new_v4().to_string();
+                let payload=serde_json::json!({"id":id,"full_name":"Recovery member","face_vector":vec![0.123456789_f64;512]}).to_string();
+                rows.push(db::OutboxItem {
+                    id,
+                    op: "member".into(),
+                    payload,
+                    attempts: 0,
+                    created_at: String::new(),
+                });
+            }
+            let (first, ids, rejected) = prepare_push(&rows, None);
+            assert!(serde_json::to_vec(&first).unwrap().len() <= PUSH_BODY_CAP);
+            assert!(!ids.is_empty() && ids.len() < 100);
+            assert!(rejected.is_empty());
+            rows.retain(|row| !ids.contains(&row.id));
+            let (second, next, rejected) = prepare_push(&rows, None);
+            assert_eq!(next.len() + ids.len(), 100);
+            assert!(serde_json::to_vec(&second).unwrap().len() <= PUSH_BODY_CAP);
+            assert!(rejected.is_empty());
+            assert!(rows.iter().all(|row| row.attempts == 0));
+        }
+
+        #[test]
+        fn malformed_and_oversized_records_do_not_block_smaller_valid_rows() {
+            let make = |id: &str, op: &str, payload: String| db::OutboxItem {
+                id: id.into(),
+                op: op.into(),
+                payload,
+                attempts: 0,
+                created_at: String::new(),
+            };
+            let rows = vec![
+                make("broken", "sale", "bad json".into()),
+                make(
+                    "large",
+                    "sale",
+                    serde_json::json!({"id":"large","items":"x".repeat(PUSH_BODY_CAP)}).to_string(),
+                ),
+                make(
+                    "small",
+                    "attendance",
+                    serde_json::json!({"id":"small"}).to_string(),
+                ),
+            ];
+            let (body, ids, rejected) = prepare_push(&rows, None);
+            assert_eq!(ids.len(), 1);
+            assert!(ids.contains("small"));
+            assert_eq!(rejected, vec!["broken", "large"]);
+            assert_eq!(body["attendance"].as_array().unwrap().len(), 1);
+        }
 
         #[test]
         fn malformed_success_does_not_verify_terminal() {

@@ -164,7 +164,7 @@ try {
   pass('verified account resumes setup and reaches Get Started automatically');
   const oldDownload=await tab('http://127.0.0.1:5177/#/owner/start',cloud('owner',{version:'3.0.3',download_url:'https://example.invalid/old-installer.exe'}));
   assert.equal(await evaluate(oldDownload,"!!document.querySelector('a[href=\"https://example.invalid/old-installer.exe\"]')"),false);
-  const newDownload=await tab('http://127.0.0.1:5177/#/owner/start',cloud('owner',{version:'3.0.4',download_url:'https://example.invalid/account-installer.exe'}));
+  const newDownload=await tab('http://127.0.0.1:5177/#/owner/start',cloud('owner',{version:'3.0.5',download_url:'https://example.invalid/account-installer.exe'}));
   assert.equal(await evaluate(newDownload,"!!document.querySelector('a[href=\"https://example.invalid/account-installer.exe\"]')"),true);
   pass('account setup rejects old installers and accepts the matching release');
   const owner=await tab('http://127.0.0.1:5177/#/owner/keys',cloud('owner'));

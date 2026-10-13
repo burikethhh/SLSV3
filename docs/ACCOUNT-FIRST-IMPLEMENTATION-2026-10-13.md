@@ -1,4 +1,4 @@
-# Account-first GymPOS 3.0.4 — implementation and release handoff
+# Account-first GymPOS 3.0.5 — implementation and release handoff
 
 Date: 2026-10-13 (Asia/Manila). Source baseline: `a6e7aad`.
 Codex: programmer/technical lead. Gemini: version-control/release coordinator.
@@ -9,7 +9,7 @@ The owner explicitly authorized deployment after passing release checks, and com
 Migrations 0013–0016 and nine updated Edge Functions are deployed to `tlfytevjhzcgrttcdipq`.
 The dashboard is READY on `https://sls.keth.website` and `https://sls-v3-web.vercel.app`.
 Vercel deployment: `dpl_GNZ1fu4qmJbJ8Qf5UZtm4GjBtuZt`.
-The existing updater key signed the matching 3.0.4 NSIS installer; signature and tamper rejection were independently verified. GitHub publication/feed verification is the remaining release step at this document's source commit; see the final rollout record below.
+The existing updater key signed the matching 3.0.5 NSIS installer. Version 3.0.4 was published immutably, then its automatic rollout held at 0% when a final large-outbox review found that 100 face records can exceed the server's 512 KiB request cap. Version 3.0.5 adds byte-bounded requests, preserves deferred IDs/attempts, and isolates malformed/individually oversized records for quarantine instead of blocking valid rows. See final rollout record below.
 
 Do not use or modify the portfolio apex domains. No installed GymPOS, live local SQLite database, physical controller, customer password or account was operated/reset for verification.
 
@@ -37,7 +37,7 @@ The existing three-day grace (including trial grace) and seven-day verification 
 - Complete keyset-paginated pulls (500/page; guarded 50,000 maximum) cover roster, catalog, staff, promos and plans. Failure/overflow never pretends to be a complete snapshot.
 - Incremental face changes use a server-time cursor. Deleted members are denied and lose local face data; pending local enrollments remain. Metadata/face/plan/cursor writes commit together. Invalid faces roll back the cursor.
 - Enrollment requires a synced plan and atomically records its expiry, member and outbox payload. Re-uploading a face cannot reactivate a frozen member or extend an existing cloud expiry.
-- Only explicit rejected rows consume outbox attempts; transient outages do not quarantine good transactions. Quarantined rows and IDs are preserved.
+- Only explicit server rejection or a locally malformed/individually oversized row consumes outbox attempts; network failures and deferred byte-bound records do not. Quarantined rows and IDs are preserved.
 - Owner reports aggregate all RLS-visible rows in PostgreSQL using Manila calendar days, signed refunds and line discounts. Native dashboard totals aggregate all local sales, not the displayed recent 20. Labels distinguish upload from settlement.
 - Existing peso-entry/cent conversion and low-stock indicators are retained.
 - Bootstrap is closed unless a verified intended administrator email is configured. Legacy live-account test harnesses are retired; they previously reset an existing CEO password/mutated live subscriptions.
@@ -45,7 +45,7 @@ The existing three-day grace (including trial grace) and seven-day verification 
 ## Existing terminal recovery — explicit, not automatic
 
 1. Close the old app and retain its original database, WAL/SHM and face assets.
-2. Sign into 3.0.4 with the owning account; select and verify the correct licensed facility.
+2. Sign into 3.0.5 with the owning account; select and verify the correct licensed facility.
 3. Account & Help offers recovery only when legacy records exist. Confirm the facility.
 4. Native recovery verifies all cached legacy token signatures and requires their gym identities to match. Missing/invalid/mixed ownership evidence is refused for manual review.
 5. SQLite online backups preserve committed WAL data in private app-data `recovery/<UUID>/legacy.sqlite` and `facility-before.sqlite`.
@@ -61,14 +61,14 @@ From repository root unless another directory is named:
 | Command | Result |
 | --- | --- |
 | `cargo test` | 16 shared-core tests passed, doc tests passed |
-| `cargo test --lib` in `desktop/src-tauri` | 28 passed, 0 failed, 1 explicitly ignored interoperability fixture |
+| `cargo test --lib` in `desktop/src-tauri` | 3.0.5: 30 passed, 0 failed, 1 explicitly ignored interoperability fixture; includes byte-bound draining and malformed/oversize isolation |
 | `node scripts/e2e/license-interop.mjs` | Separately ran that ignored test with an offline RSA-PSS fixture from the existing private key; 1 passed; no production writes or token output |
 | `node scripts/e2e/account-lifecycle-db.mjs` with `SLS_TEST_DEPENDENCIES=%TEMP%/sls-account-lifecycle-tests` | All repository migrations applied to disposable PGlite; 31 scenarios passed |
 | `node scripts/e2e/account-lifecycle-ui.mjs` | 15 isolated synthetic browser scenarios passed; no cloud writes or physical hardware |
 | `npm exec -- tsc --noEmit -p tsconfig.json` in `web` | Exit 0, no diagnostics |
 | `npm run build` in `web` | Vite 54 modules, exit 0 |
-| `npm run build:exe` in `desktop`, with existing `TAURI_SIGNING_PRIVATE_KEY` path and empty password | Webview 11 modules; release compilation 4m20s; NSIS installer and updater signature generated |
-| `cargo run --manifest-path scripts/release-verifier/Cargo.toml --offline -- "desktop/src-tauri/target/release/bundle/nsis/SLS v3_3.0.4_x64-setup.exe" "desktop/src-tauri/target/release/bundle/nsis/SLS v3_3.0.4_x64-setup.exe.sig" "C:/Users/ketha/.tauri/sls-update.key.pub"` | Existing fleet key verified installer; in-memory one-byte modification rejected |
+| `npm run build:exe` in `desktop`, with existing `TAURI_SIGNING_PRIVATE_KEY` path and empty password | 3.0.4: 4m20s; 3.0.5: 4m01s; webview 11 modules, NSIS installer and updater signature generated |
+| `cargo run --manifest-path scripts/release-verifier/Cargo.toml --offline -- "desktop/src-tauri/target/release/bundle/nsis/SLS v3_3.0.5_x64-setup.exe" "desktop/src-tauri/target/release/bundle/nsis/SLS v3_3.0.5_x64-setup.exe.sig" "C:/Users/ketha/.tauri/sls-update.key.pub"` | Both versions verified against existing fleet key; in-memory one-byte modification rejected |
 | `git diff --check` | Exit 0; CRLF warnings only |
 | `node --check scripts/release-control.mjs` and the new JS harnesses | Exit 0 |
 
@@ -82,9 +82,9 @@ deno test --no-config --no-lock --node-modules-dir=none --allow-env=RSA_PRIVATE_
 
 Results: lint 15 files; all function type checks passed; 5 tests passed. The web packages declare no lint/test npm scripts; type/build and the explicit regression harnesses were used.
 
-UI artifacts: `C:/Users/ketha/AppData/Local/Temp/sls-account-ui-1791879560667`; first-run, CEO named assignments and mobile screenshots visually reviewed.
+UI artifacts: `C:/Users/ketha/AppData/Local/Temp/sls-account-ui-1791880765885`; all 15 scenarios passed with the 3.0.5 download fixture. First-run, CEO named assignments and mobile screenshots visually reviewed.
 
-## Installer and backup evidence
+## Historical 3.0.4 installer and backup evidence
 
 - Installer: `desktop/src-tauri/target/release/bundle/nsis/SLS v3_3.0.4_x64-setup.exe`; 25,162,418 bytes.
 - Installer SHA256: `EAA1C71F2D71A63E4328ED375A5DC6726281B01984247EBCE0D18DC484DB7258`.
@@ -102,7 +102,7 @@ UI artifacts: `C:/Users/ketha/AppData/Local/Temp/sls-account-ui-1791879560667`; 
 - `supabase db push --linked --dry-run`: listed only 0013–0016; `supabase db push --linked --yes` applied those four successfully.
 - `supabase functions deploy owner-apply gym-admin license-fetch license-issue license-revoke user-admin staff-create sync bootstrap-ceo --project-ref tlfytevjhzcgrttcdipq --use-api --jobs 4`: nine ACTIVE functions deployed; sync remains JWT-gateway-disabled with signed-device verification inside.
 - `supabase config diff --project-ref tlfytevjhzcgrttcdipq` then `supabase config push --project-ref tlfytevjhzcgrttcdipq --yes`: changed ONLY the alternate SLS dashboard verification redirect; undeclared SMTP/Twilio settings remained untouched.
-- `node scripts/release-control.mjs smoke`: seven anonymous privileged-function calls denied (401/403); anonymous account-admin RPC denied (401). Read-only SQL verifies no attendance insert/staff-hash select/account-admin execute privileges.
+- `node scripts/release-control.mjs smoke`: seven anonymous privileged-function calls denied (401/403); anonymous account-admin RPC denied (401). Deployed RSA verifier accepts the offline/native key pair's signature but refuses its nonexistent license; sync denies that nonexistent facility/license. No business rows were created. Read-only SQL confirms no attendance insert/staff-hash select/account-admin execute privileges.
 - Production business counts stayed at one facility, one license and one CEO; no member/sale/attendance/staff records were created by checks.
 - Vercel first failed from `web` (hosted Root Directory is `web`). Root upload initially excluded its parent; corrected `.vercelignore` and used `vercel deploy --dry --json` to verify a web-only upload excluding credentials/firmware/builds.
 - From repository root, `VERCEL_ORG_ID=team_VDAgUperPy830hX1OjNTZrrH`, `VERCEL_PROJECT_ID=prj_z7ghbXExN83509Z86Obza4VOoyd3`, `vercel --prod --yes`: READY; production aliases restricted to SLS/existing project aliases. No apex domain command was issued.
@@ -120,4 +120,12 @@ UI artifacts: `C:/Users/ketha/AppData/Local/Temp/sls-account-ui-1791879560667`; 
 
 ## Final rollout record
 
-GitHub release, stable feed and final commit verification will be recorded after publication. Gemini must preserve the owner's unrelated hardware/firmware/scratch files, keep secrets/models/builds/backups out of Git, and review this source rather than waiting for an obsolete handoff.
+Account-first source commit `4c3ca1f1a180a68f5ebb62f6e6ffee5c613c47d6` was pushed atomically to origin/master and origin/main (both started at the same baseline). Immutable GitHub 3.0.4 release was published, its downloaded installer hash and feed signature matched, and current-version requests returned HTTP 204. A final audit then found byte-overflow risk in bulk pending enrollment, so `node scripts/release-control.mjs hold` set only 3.0.4 rollout to 0%; public updater requests correctly returned 204.
+
+Version 3.0.5 is built with the byte-bounded fix and 30 passing native tests; offline RSA interoperability and all 15 UI tests passed again. Installer signature and tamper rejection passed again. Its immutable publication/feed verification will be recorded after the patch source commit.
+
+- 3.0.5 installer: 25,171,241 bytes; SHA256 `911F9FBDED637734823C181759A1FABA16DFC4D9D612E2B750A1ECE6B828F1FF`.
+- 3.0.5 updater-signature file SHA256: `64069A8B58A505F5DE7ABB9207BED44DB69E82751AA10871EE9874468FF3F1F1`.
+- 3.0.5 EXE: 38,203,392 bytes; SHA256 `6234D2DFEFA4CD98C15E80E6537590CBE0B6604CC388ACA245C784AEFEA63948`.
+
+Gemini must preserve unrelated hardware/firmware/scratch files, keep secrets/models/builds/backups out of Git, and use the published tag's matching source. No published binary or signing key was overwritten or rotated.

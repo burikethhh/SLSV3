@@ -1,7 +1,7 @@
 {
   "name": "sls-v3-desktop",
   "private": true,
-  "version": "3.0.4",
+  "version": "3.0.5",
   "type": "module",
   "scripts": {
     "build:web": "npm --prefix webview run build",
