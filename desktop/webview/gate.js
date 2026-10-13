@@ -496,6 +496,7 @@ function startLoop() {
     timer = setTimeout(tick, FRAME_MS);
     if (tickCount++ % Math.round(DOOR_MS / FRAME_MS) === 0) refreshDoor();
     if (tickCount % 2 === 0) pollHardwareButtons();
+    if (!window.__sls_operable || document.getElementById("view-gate")?.hidden) return;
     if (busy || !invoke) return;
     const video = document.getElementById("cam");
     if (!video || video.readyState < 2) return;

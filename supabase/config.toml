@@ -8,7 +8,7 @@ name = "sls-v3"
 email_sent = 60
 
 [auth]
-additional_redirect_urls = ["https://sls.keth.website/**", "http://localhost:5173/**", "http://127.0.0.1:5173/**"]
+additional_redirect_urls = ["https://sls.keth.website/**", "https://sls-v3-web.vercel.app/**", "http://localhost:5173/**", "http://127.0.0.1:5173/**"]
 site_url = "https://sls.keth.website"
 
 [auth.email]

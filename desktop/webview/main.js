@@ -1,7 +1,6 @@
-// Sidebar router + terminal header (license/hw badges, quick unlock).
-// Views lazy-load so the gate kiosk never pays for POS/dashboard JS.
+// One native terminal state controls navigation and operational access.
+import { renderConnection } from "./connection.js";
 const invoke = window.__TAURI__?.core?.invoke;
-
 const modules = {
   pos: () => import("./pos.js").then((m) => m.initPos()),
   gate: () => import("./gate.js").then((m) => m.initGate()),
@@ -9,101 +8,97 @@ const modules = {
   dash: () => import("./dash.js").then((m) => m.initDash()),
   settings: () => import("./settings.js").then((m) => m.initSettings()),
 };
+let activeView = "connection";
+let polling = false;
+let lastGym = null;
+window.__sls_operable = false;
+const stage = document.getElementById("stage");
+const connection = document.createElement("section");
+connection.id = "view-connection";
+stage.prepend(connection);
+const link = document.createElement("button");
+link.className = "nav-item"; link.dataset.view = "connection";
+link.innerHTML = '<span class="lbl">Account & Help</span>';
+document.getElementById("sidebar").prepend(link);
 
 function setBadge(id, text, tone) {
   const el = document.getElementById(id);
-  if (!el) return;
-  el.className = `badge${tone ? " " + tone : ""}`;
-  el.textContent = text;
+  if (el) { el.className = `badge ${tone || ""}`; el.textContent = text; }
 }
-
-/** Header mirrors the gate/hw state without duplicating the views' own
- *  polling — refreshed on boot + every view switch. All guarded: a missing
- *  shell (plain-browser preview) just shows neutral badges. */
-async function refreshHeader() {
-  if (!invoke) {
-    setBadge("hdr-sync", "SYNCED", "good");
-    setBadge("hdr-license", "S · ULTRA", "badge-ultra");
-    setBadge("hdr-hw", "ESP32 ONLINE", "good");
-    const gym = document.getElementById("hdr-gym");
-    if (gym) gym.textContent = "SOLO LEVELING SYSTEM";
-    return;
-  }
-  try {
-    const st = await invoke("license_status");
-    const t = String(st?.type ?? "unknown").toLowerCase();
-    const rankBadge = t === "valid" ? "badge-ultra" : t === "graceperiod" ? "warn" : "bad";
-    let rankLabel = t.toUpperCase();
-    if (t === "valid") {
-      const d = st?.days_remaining;
-      rankLabel = d !== undefined ? `S · ULTRA (${d}d)` : "S · ULTRA";
-    } else if (t === "graceperiod") {
-      const g = st?.grace_days_remaining;
-      rankLabel = g !== undefined ? `⚠️ GRACE (${g}d)` : "GRACE PERIOD";
-    } else if (t === "expired") {
-      rankLabel = "❌ EXPIRED";
-    }
-    setBadge("hdr-license", rankLabel, rankBadge);
-    const gym = document.getElementById("hdr-gym");
-    if (gym && st?.gym_name) gym.textContent = String(st.gym_name).toUpperCase();
-  } catch {
-    setBadge("hdr-license", "license error", "bad");
-  }
-  try {
-    const hw = await invoke("hw_status");
-    if (!hw?.feature) setBadge("hdr-hw", "no controller", "bad");
-    else if (hw?.connected) setBadge("hdr-hw", `ESP32 ${hw.port ?? ""}`.trim(), "good");
-    else setBadge("hdr-hw", "waiting ESP32…", "warn");
-  } catch {
-    setBadge("hdr-hw", "controller error", "bad");
-  }
-  try {
-    const pending = await invoke("sync_pending");
-    if (pending > 0) {
-      setBadge("hdr-sync", `${pending} QUEUE`, "warn");
-    } else {
-      setBadge("hdr-sync", "SYNCED", "good");
-    }
-  } catch {
-    if (!invoke) setBadge("hdr-sync", "LOCAL SQLITE", "badge-pro");
+async function showView(view) {
+  if (view !== "connection" && !window.__sls_operable) view = "connection";
+  activeView = view;
+  document.querySelectorAll("#stage > section").forEach((section) => { section.hidden = section.id !== `view-${view}`; });
+  document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  window.dispatchEvent(new CustomEvent("sls:view", { detail: view }));
+  if (view !== "connection") {
+    try { await modules[view]?.(); }
+    catch (error) { setBadge("hdr-sync", String(error), "bad"); }
   }
 }
-
-document.querySelectorAll(".nav-item").forEach((b) => {
-  b.addEventListener("click", () => {
-    document.querySelectorAll(".nav-item").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active");
-    document.querySelectorAll("main > section").forEach((s) => (s.hidden = true));
-    document.getElementById(`view-${b.dataset.view}`).hidden = false;
-    const load = modules[b.dataset.view];
-    if (load) load();
-    void refreshHeader();
-  });
-});
-
-document.getElementById("hdr-unlock")?.addEventListener("click", async () => {
-  const btn = document.getElementById("hdr-unlock");
-  if (btn) {
-    btn.style.filter = "brightness(1.4)";
-    setTimeout(() => { btn.style.filter = ""; }, 1000);
-  }
-  window.__sls_log_override?.("Staff Override");
-  if (!invoke) {
-    setBadge("hdr-hw", "unlocked — maglock pulsed (demo)", "good");
-    setTimeout(() => refreshHeader(), 3000);
-    return;
-  }
+window.__sls_open_connection = () => showView("connection");
+document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => void showView(button.dataset.view)));
+document.getElementById("hdr-unlock").disabled = true;
+document.getElementById("hdr-unlock").addEventListener("click", async () => {
+  if (!invoke || !window.__sls_operable) return;
   try {
     await invoke("hw_manual_override", { operator: "Kiosk Staff", duration_ms: 3000 });
-    setBadge("hdr-hw", "unlocked — maglock pulsed", "good");
-  } catch (e) {
-    // Never swallow: a gate that greets but doesn't open looks "fine" until class starts.
-    setBadge("hdr-hw", `NOT OPENING — ${e}`, "bad");
-  }
+    setBadge("hdr-hw", "Gate unlock sent", "good");
+  } catch (error) { setBadge("hdr-hw", String(error), "bad"); }
 });
 
+async function refreshHeader() {
+  if (polling) return;
+  polling = true;
+  try {
+    const account = invoke ? await invoke("account_status") : {
+      signed_in: false, gyms: [], online: false, license: { type: "Unlicensed" },
+      message: "Open the installed GymPOS desktop app to connect.",
+    };
+    renderConnection(account);
+    const type = String(account.license?.type || "unlicensed").toLowerCase();
+    const operable = !!invoke && !!account.gym_id && ["valid", "graceperiod"].includes(type);
+    const wasOperable = window.__sls_operable;
+    if (lastGym && account.gym_id && lastGym !== account.gym_id) { location.reload(); return; }
+    lastGym = account.gym_id;
+    window.__sls_operable = operable;
+    document.getElementById("hdr-unlock").disabled = !operable || !["owner", "manager"].includes(account.operator?.role);
+    if (activeView === "settings") await modules.settings();
+    document.querySelectorAll(".nav-item").forEach((button) => { button.disabled = button.dataset.view !== "connection" && !operable; });
+    const label = type === "valid" ? `${account.license.tier?.toUpperCase() || "ACTIVE"} · ${account.license.days_remaining}d`
+      : type === "graceperiod" ? `GRACE · ${account.license.grace_days_remaining}d` : type.toUpperCase();
+    setBadge("hdr-license", label, operable ? (type === "graceperiod" ? "warn" : "good") : "bad");
+    setBadge("hdr-sync", `${account.online ? "CLOUD VERIFIED" : "OFFLINE"} · ${account.pending_uploads || 0} pending`, account.online ? "good" : "warn");
+    document.getElementById("hdr-gym").textContent = account.gym_name || "GymPOS · Connect your account";
+    if (invoke) {
+      const hardware = await invoke("hw_status");
+      setBadge("hdr-hw", hardware.connected ? `Controller · ${hardware.port || "connected"}` : "Controller disconnected", hardware.connected ? "good" : "warn");
+    } else setBadge("hdr-hw", "DESKTOP BRIDGE UNAVAILABLE", "bad");
+    if (!operable) {
+      window.__sls_media_stream?.getTracks().forEach((track) => track.stop());
+      window.__sls_media_stream = null;
+      if (activeView !== "connection" || !wasOperable) await showView("connection");
+    } else if (!wasOperable) {
+      startCamera();
+      await showView("gate");
+    }
+  } catch (error) {
+    window.__sls_operable = false;
+    document.getElementById("hdr-unlock").disabled = true;
+    setBadge("hdr-license", "STATUS UNAVAILABLE", "bad");
+    await showView("connection");
+  } finally { polling = false; }
+}
+window.__sls_refresh_state = refreshHeader;
+void showView("connection");
+void refreshHeader();
+setInterval(() => void refreshHeader(), 1000);
+window.addEventListener("focus", () => {
+  if (invoke) void invoke("account_refresh").catch(() => {}).finally(refreshHeader);
+});
 // Single camera preview (detection/recognition run in Rust via ort; JS only previews + exposure hint)
 export function startCamera() {
+  if (!window.__sls_operable || window.__sls_media_stream) return;
   const retryBtn = document.getElementById("cam-retry");
   if (retryBtn) retryBtn.style.display = "none";
   navigator.mediaDevices?.getUserMedia?.({ video: { width: 640 } })
@@ -126,12 +121,7 @@ export function startCamera() {
     });
 }
 window.__sls_start_cam = startCamera;
-startCamera();
 
-// Auto-load gate and settings on boot so initial view is initialized.
-modules.gate();
-modules.settings();
-void refreshHeader();
 
 // Collapsing sidebar rail (persisted per terminal).
 try {

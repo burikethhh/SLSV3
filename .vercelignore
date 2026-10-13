@@ -1,0 +1,9 @@
+# Deploy from repository root: hosted project Root Directory is web.
+# Allowlist dashboard source only; never upload keys, backups or firmware.
+*
+!web
+!web/**
+web/.env*
+web/node_modules
+web/dist
+web/.vercel

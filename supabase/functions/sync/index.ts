@@ -19,10 +19,10 @@ import { serve } from "../_shared/cors.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0";
 import { importPublicKey, PSS, b64url } from "../_shared/licenseCrypto.ts";
 import { check, rateLimitedResponse } from "../_shared/rateLimit.ts";
+import { readSnapshot } from "../_shared/snapshot.ts";
 
 const ARRAY_CAP = 500;
 const BODY_CAP = 512 * 1024;
-const PRODUCT_IDS_CAP = 5000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const asUuid = (v: unknown): string | null => (typeof v === "string" && UUID_RE.test(v) ? v : null);
 
@@ -89,20 +89,37 @@ serve(async (req) => {
   // Expiry uses the same 3-day grace as the desktop evaluator
   // (sls-core LicenseClaims::evaluate) and fleet_mrr, so a terminal in its
   // grace window can still push while the dashboard shows it as grace.
-  const [{ data: gym }, { data: lic }] = await Promise.all([
-    supa.from("gyms").select("disabled").eq("id", gymId).maybeSingle(),
-    supa.from("licenses").select("revoked,expires_at").eq("id", licenseId).maybeSingle(),
+  const [{ data: gym, error: gymError }, { data: lic, error: licenseError }] = await Promise.all([
+    supa.from("gyms").select("disabled,status").eq("id", gymId).maybeSingle(),
+    supa.from("licenses").select("revoked,expires_at").eq("id", licenseId).eq("gym_id", gymId).maybeSingle(),
   ]);
+  if (gymError || licenseError) return new Response("Verification temporarily unavailable", { status: 503 });
   const graceMs = 3 * 86400_000;
   const expMs = lic?.expires_at ? Date.parse(lic.expires_at as string) : NaN;
   const pastGrace = Number.isFinite(expMs) ? Date.now() > expMs + graceMs : true;
-  if (!gym || !lic || gym.disabled || lic.revoked || pastGrace) {
+  if (!gym || !lic || gym.disabled || gym.status === "rejected" || lic.revoked || pastGrace) {
     return Response.json({ remote_disabled: true, products: [], product_ids: [], server_time: Date.now() });
+  }
+
+  if (claims.device_id) {
+    const { data: terminal, error: deviceError } = await supa.from("terminals").select("active,hwid")
+      .eq("id", claims.device_id).eq("gym_id", gymId).maybeSingle();
+    if (deviceError) return new Response("Device verification unavailable", { status: 503 });
+    const accountId = asUuid(claims.account_id);
+    if (!accountId) return new Response("Invalid device account", { status: 401 });
+    const { data: account, error: accountError } = await supa.auth.admin.getUserById(accountId);
+    if (accountError) return new Response("Account verification unavailable", { status: 503 });
+    if (!terminal?.active || terminal.hwid !== claims.hwid || account.user?.app_metadata?.role !== "owner"
+      || !account.user?.app_metadata?.gym_ids?.includes(gymId)) {
+      return Response.json({ remote_disabled: true, products: [], product_ids: [], server_time: Date.now() });
+    }
   }
 
   let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    const rawBody=await req.text();
+    if(new TextEncoder().encode(rawBody).length>BODY_CAP) return new Response("body too large",{status:413});
+    body = JSON.parse(rawBody);
   } catch {
     return new Response("bad json", { status: 400 });
   }
@@ -120,17 +137,12 @@ serve(async (req) => {
     const id = asUuid((m as Record<string, unknown>)?.id);
     if (!id) continue;
     const row = m as Record<string, unknown>;
-    const { error } = await supa.from("members").upsert(
-      {
-        id,
-        gym_id: gymId,
-        full_name: String(row.full_name ?? "").slice(0, 200),
-        embedding_dim: Number(row.embedding_dim ?? 512),
-        face_vector: row.face_vector ?? null,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "id" },
-    );
+    const vector=row.face_vector;
+    const expires=typeof row.expires_at==="string"?row.expires_at:null;
+    if(!Array.isArray(vector)||vector.length!==512||vector.some(v=>typeof v!=="number"||!Number.isFinite(v))
+      ||(expires!==null&&!Number.isFinite(Date.parse(expires)))) {failedIds.push(id);continue;}
+    const {error}=await supa.rpc("sync_member_enrollment",{p_gym:gymId,p_member:id,
+      p_name:String(row.full_name??"").slice(0,200),p_vector:vector,p_expires:expires});
     if (error) {
       console.error("member upsert", error.message);
       failedIds.push(id);
@@ -223,28 +235,27 @@ serve(async (req) => {
   // staff = terminal PIN cache (PHC pin_hash; verified offline on-device).
   // promos = active discount vouchers for this gym or global templates.
   // members = active member status & plan expiration dates for gate guard.
-  const [products, productIds, staff, promos, membersList] = await Promise.all([
-    supa.from("products").select("id,name,price_cents,stock").eq("gym_id", gymId).limit(500),
-    supa.from("products").select("id").eq("gym_id", gymId).limit(PRODUCT_IDS_CAP),
-    supa.from("staff").select("id,username,pin_hash,role,active").eq("gym_id", gymId).eq("active", true).limit(100),
-    supa.from("promos").select("code,pct_off,active").or(`gym_id.is.null,gym_id.eq.${gymId}`).eq("active", true).limit(100),
-    supa.from("members").select("id,full_name,status,expires_at").eq("gym_id", gymId).is("deleted_at", null).limit(500),
-  ]);
-  if (products.error || productIds.error || staff.error || promos.error || membersList.error) {
-    console.error("pull", products.error?.message ?? productIds.error?.message ?? staff.error?.message ?? promos.error?.message ?? membersList.error?.message);
-    return Response.json({ remote_disabled: false, error: "pull failed" }, { status: 502 });
-  }
-
-  return Response.json({
-    remote_disabled: false,
-    products: products.data ?? [],
-    product_ids: (productIds.data ?? []).map((p) => p.id as string),
-    staff: staff.data ?? [],
-    promos: promos.data ?? [],
-    members: membersList.data ?? [],
-    accepted_ids: acceptedIds,
-    failed_ids: failedIds,
-    server_time: Date.now(),
+  const cutoff=new Date().toISOString();
+  const requestedSince=typeof body.face_since==="string"?Date.parse(body.face_since):0;
+  const since=Number.isFinite(requestedSince)&&requestedSince>=0&&requestedSince<=Date.now()?new Date(requestedSince).toISOString():new Date(0).toISOString();
+  const pull=(table:string,columns:string,global=false,faces=false)=>readSnapshot((after,size)=> {
+    let query=supa.from(table).select(columns).order("id").limit(size);
+    query=global?query.or(`gym_id.is.null,gym_id.eq.${gymId}`):query.eq("gym_id",gymId);
+    if(after)query=query.gt("id",after);
+    if(table==="staff"||table==="promos")query=query.eq("active",true);
+    if(table==="members")query=query.is("deleted_at",null);
+    if(faces)query=query.eq("embedding_dim",512).gte("updated_at",since).lte("updated_at",cutoff);
+    return query as unknown as PromiseLike<{data:({id:string}&Record<string,unknown>)[]|null;error:unknown}>;
   });
+  try {
+    const [products,staff,promos,membersList,plans,faces]=await Promise.all([
+      pull("products","id,name,price_cents,stock"),pull("staff","id,username,pin_hash,role,active"),
+      pull("promos","id,gym_id,code,pct_off,active",true),pull("members","id,full_name,status,expires_at"),
+      pull("plans","id,name,price_cents,duration_days",true),pull("members","id,embedding_dim,face_vector",false,true),
+    ]);
+    return Response.json({remote_disabled:false,catalog_complete:true,products,product_ids:products.map(p=>p.id),
+      staff,promos:promos.sort((a,b)=>Number(a.gym_id!==null)-Number(b.gym_id!==null)),members:membersList,
+      plans,face_changes:faces,face_cursor:cutoff,accepted_ids:acceptedIds,failed_ids:failedIds,server_time:Date.now()});
+  } catch { return Response.json({remote_disabled:false,error:"Complete pull unavailable"},{status:503}); }
 });
 

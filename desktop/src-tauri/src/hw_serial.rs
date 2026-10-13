@@ -123,6 +123,7 @@ mod inner {
                                     let text = String::from_utf8_lossy(&line).trim().to_string();
                                     line.clear();
                                     if text == "EVT:EXIT_BTN" {
+                                        let _context = crate::terminal_context().read();
                                         let _ = crate::db::log_exit_button();
                                         let mut q = events.lock();
                                         if q.len() < 16 {

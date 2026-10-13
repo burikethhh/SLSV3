@@ -8,6 +8,7 @@ import { serve } from "../_shared/cors.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0";
 import { argon2id } from "npm:hash-wasm@4.12.0";
 import { check, rateLimitedResponse } from "../_shared/rateLimit.ts";
+import { needsMfa } from "../_shared/assurance.ts";
 
 serve(async (req) => {
   if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
@@ -24,6 +25,7 @@ serve(async (req) => {
   }
 
   const { gym_id, full_name, username, pin, role = "staff" } = await req.json();
+  if (needsMfa(user, jwt)) return new Response("Complete two-factor verification", { status: 403 });
   if (!gym_id || !full_name || !username) return new Response("bad fields", { status: 400 });
   const uname = String(username).trim().toLowerCase();
   if (!/^[a-z0-9_.-]{2,32}$/.test(uname)) return new Response("username must be 2-32 chars (a-z 0-9 _ . -)", { status: 400 });

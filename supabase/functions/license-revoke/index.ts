@@ -3,6 +3,7 @@
 import { serve } from "../_shared/cors.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0";
 import { check, rateLimitedResponse } from "../_shared/rateLimit.ts";
+import { needsMfa } from "../_shared/assurance.ts";
 
 serve(async (req) => {
   if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
@@ -15,6 +16,7 @@ serve(async (req) => {
     return new Response("ceo only", { status: 403 });
   }
   const rl = check(`license-revoke:${ip}`, 30, 3600);
+  if (needsMfa(user, jwt)) return new Response("Complete two-factor verification", { status: 403 });
   if (!rl.ok) return rateLimitedResponse(rl.retryAfter);
 
   const { license_id, reason = "" } = await req.json();

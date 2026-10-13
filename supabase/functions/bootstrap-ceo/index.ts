@@ -5,6 +5,7 @@
 import { serve } from "../_shared/cors.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0";
 import { check, rateLimitedResponse } from "../_shared/rateLimit.ts";
+import { needsMfa } from "../_shared/assurance.ts";
 
 serve(async (req) => {
   if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
@@ -16,6 +17,13 @@ serve(async (req) => {
   const jwt = (req.headers.get("Authorization") ?? "").replace("Bearer ", "");
   const { data: { user } } = await supa.auth.getUser(jwt);
   if (!user) return new Response("auth required", { status: 401 });
+  if (needsMfa(user, jwt)) return new Response("Complete two-factor verification", { status: 403 });
+  // Closed by default. Ordinary client registration must never be a path to
+  // first-CEO privileges, including after an administrator removes all CEOs.
+  const trustedEmail = Deno.env.get("SLS_BOOTSTRAP_CEO_EMAIL")?.trim().toLowerCase();
+  if (!trustedEmail || !user.email_confirmed_at || user.email?.toLowerCase() !== trustedEmail) {
+    return new Response("CEO bootstrap is restricted to the configured installation administrator", { status: 403 });
+  }
 
   const { data: claimed, error } = await supa.rpc("claim_first_ceo", { target_user: user.id });
   if (error) {

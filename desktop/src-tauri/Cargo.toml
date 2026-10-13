@@ -1,6 +1,6 @@
 [package]
 name = "sls-desktop"
-version = "3.0.3"
+version = "3.0.4"
 edition = "2021"
 
 # Slim Tauri v2 shell. Excluded from default workspace build (needs system webview + ort native lib).
@@ -14,20 +14,21 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
 sha2 = "0.10"
 rsa = { version = "0.9", features = ["pem"] }
 parking_lot = "0.12"
+keyring = { version = "3.6", features = ["windows-native"] }
 sls-core = { path = "../../crates/sls-core" }
 # Feature-gated heavy deps — default build stays UI + SQLite only:
 ort = { version = "2.0.0-rc.13", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
 serialport = { version = "4.5", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
-tokio = { version = "1", features = ["rt", "macros", "time"], optional = true }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"], optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 
 [features]

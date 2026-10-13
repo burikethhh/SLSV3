@@ -30,6 +30,7 @@ function scope<T>(query: T, s: Session, col = "gym_id"): T {
  *  owners get an empty list → forms render read-only instead of failing
  *  silently against NOT NULL / RLS). */
 async function writableGyms(s: Session): Promise<{ id: string; name: string }[]> {
+  if ((s as { user?: { app_metadata?: { role?: string } } })?.user?.app_metadata?.role === "manager") return [];
   const ids = myGymIds(s);
   if (!ids || !ids.length) return [];
   const { data } = await db().from("gyms").select("id,name").in("id", ids).order("name");
@@ -54,6 +55,7 @@ export async function renderOwner(root: HTMLElement, path: string, s: Session) {
   if (path.startsWith("/txns")) return txns(body, s, token);
   if (path.startsWith("/staff")) return staff(body, s, token);
   if (path.startsWith("/keys")) return keys(body, s);
+  if (path.startsWith("/start") || path.startsWith("/help")) return gettingStarted(body, s);
   return overview(body, s, token);
 }
 
@@ -61,114 +63,42 @@ async function overview(root: HTMLElement, s: Session, token: number) {
   const charts: { destroy(): void }[] = [];
   const load = async () => {
     if (token !== viewToken || !root.isConnected) return; // navigated away mid-fetch
-    const [{ data: sales }, { data: att }, { count: members }, { data: products }, { data: gyms },
+    const [{ data: rawReport, error: reportError }, { data: gyms },
       { count: nProducts }, { count: nPlans }, { count: nPromos }, { count: nStaff }, { data: lics }] = await Promise.all([
-      scope(db().from("sales").select("total_cents,created_at,gym_id,items,status").order("created_at", { ascending: false }).limit(500), s),
-      scope(db().from("attendance").select("created_at,gym_id,member_id,direction").order("created_at", { ascending: false }).limit(500), s),
-      scope(db().from("members").select("id", { count: "exact", head: true }).is("deleted_at", null), s),
-      scope(db().from("products").select("id,name").limit(500), s),
-      db().from("gyms").select("id,name,status").order("name"),
+      db().rpc("owner_report"),
+      db().from("gyms").select("id,name,status,disabled").order("name"),
       scope(db().from("products").select("id", { count: "exact", head: true }), s),
-      scope(db().from("plans").select("id", { count: "exact", head: true }), s, "gym_id"),
-      scope(db().from("promos").select("id", { count: "exact", head: true }).eq("active", true), s, "gym_id"),
+      scope(db().from("plans").select("id", { count: "exact", head: true }), s),
+      scope(db().from("promos").select("id", { count: "exact", head: true }).eq("active", true), s),
       scope(db().from("staff").select("id", { count: "exact", head: true }), s),
-      scope(db().from("licenses").select("id,gym_id,expires_at,revoked,is_trial").order("created_at", { ascending: false }).limit(5), s),
+      scope(db().from("current_subscriptions").select("id,gym_id,expires_at,revoked,is_trial").order("created_at", { ascending: false }), s),
     ]);
+    if (token !== viewToken || !root.isConnected) return;
+    if (reportError || !rawReport || !Array.isArray(rawReport.daily)) {
+      root.innerHTML = `<p class="pill bad">Complete report unavailable: ${esc(reportError?.message || "invalid report response")}. Refresh after checking cloud connectivity; unavailable totals are not shown as zero.</p>`;
+      return;
+    }
+    const report = rawReport as {
+      month_revenue_cents: number; today_revenue_cents: number; today_transactions: number;
+      today_checkins: number; today_exits: number; active_members: number;
+      daily: { day: string; total_cents: number }[];
+      top_products: { id: string; name: string; total_cents: number }[];
+      hours: { hour: number; entries: number }[];
+      branches: { name: string; total_cents: number; transactions: number; checkins: number }[];
+    };
     const nKeys = (lics ?? []).length;
-    const now = new Date();
-    const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const salesRows = (sales ?? []).filter((r) => (r.status ?? "sale") !== "void");
-    const signed = (r: { total_cents: number; status?: string }) =>
-      (r.status ?? "sale") === "refund" ? -Number(r.total_cents) : Number(r.total_cents);
-    // Verified check-ins (face entry): member_id present + direction is 'in'.
-    // Exits (button out) have direction 'out'. Overrides have member_id null.
-    const attRows = (att ?? []).filter((a) => a.member_id && (a.direction === "in" || !a.direction));
-    const exitRows = (att ?? []).filter((a) => a.direction === "out");
-    const monthRev = salesRows.filter((r) => new Date(r.created_at) >= monthStart).reduce((a, r) => a + signed(r), 0);
-    const todaySales = salesRows.filter((r) => new Date(r.created_at) >= dayStart);
-    const todayRev = todaySales.reduce((a, r) => a + signed(r), 0);
-    const todayAtt = attRows.filter((a) => new Date(a.created_at) >= dayStart);
-    const todayExits = exitRows.filter((a) => new Date(a.created_at) >= dayStart);
-
-    // Dynamic License & Grace Period Alert Banner
-    let ovBanner = "";
-    const pendingGym = (gyms ?? []).find((g) => g.status === "pending");
-    const activeLic = (lics ?? []).find((l) => !l.revoked);
-    if (pendingGym) {
-      ovBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid rgba(245,158,11,0.5);background:rgba(245,158,11,0.06)">
-        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <div class="row" style="gap:10px">
-            <span class="pulse-dot" style="background:#fbbf24"></span>
-            <div>
-              <strong style="color:#fbbf24;font-size:14px">APPLICATION PENDING CEO REVIEW · 14-DAY TRIAL KEY ACTIVE</strong>
-              <p class="muted" style="margin:2px 0 0;font-size:12px">Your trial license is active. Official 30-day subscription begins immediately once approved by the CEO.</p>
-            </div>
-          </div>
-          <a href="#/owner/keys" class="stat-badge badge-basic" style="text-decoration:none">View License Key</a>
-        </div>
-      </div>`;
-    } else if (activeLic) {
-      const diff = (new Date(activeLic.expires_at).getTime() - now.getTime()) / 86400000;
-      if (diff <= 0 && diff >= -3) {
-        const graceDays = Math.ceil(3 + diff);
-        ovBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.12)">
-          <div class="row" style="gap:10px">
-            <span class="pulse-dot" style="background:#ef4444"></span>
-            <div>
-              <strong style="color:#ef4444;font-size:14px">⚠️ 3-DAY GRACE PERIOD RUNNING · ${graceDays} DAY(S) BEFORE TERMINAL LOCKOUT</strong>
-              <p class="muted" style="margin:2px 0 0;font-size:12px">Your subscription expired on ${new Date(activeLic.expires_at).toLocaleDateString()}. Please renew promptly to keep GymPOS terminals and gate maglocks operable.</p>
-            </div>
-          </div>
-        </div>`;
-      } else if (diff < -3) {
-        ovBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.2)">
-          <strong style="color:#ef4444;font-size:14px">❌ SUBSCRIPTION EXPIRED · TERMINALS LOCKED</strong>
-          <p class="muted" style="margin:2px 0 0;font-size:12px">Your subscription and 3-day grace period have both expired. Terminals are fail-closed.</p>
-        </div>`;
-      }
-    }
-    // 30-day revenue trend
-    const days: string[] = [];
-    const dayTotals = new Array(30).fill(0);
-    for (let i = 29; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(now.getDate() - i);
-      days.push(d.toLocaleDateString(undefined, { month: "short", day: "numeric" }));
-    }
-    for (const r of salesRows) {
-      const diff = Math.floor((now.getTime() - new Date(r.created_at).getTime()) / 86400000);
-      if (diff >= 0 && diff < 30) dayTotals[29 - diff] += signed(r) / 100;
-    }
-    // Top products donut from sale line items {product_id, qty, unit_cents}
-    const prodName = new Map((products ?? []).map((p) => [p.id, p.name]));
-    const byProd = new Map<string, number>();
-    for (const r of salesRows) {
-      for (const it of (r.items as { product_id: string; qty: number; unit_cents: number }[] | null) ?? []) {
-        byProd.set(it.product_id, (byProd.get(it.product_id) ?? 0) + Number(it.qty) * Number(it.unit_cents) / 100);
-      }
-    }
-    const top = [...byProd.entries()].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 5);
-    // 24h foot-traffic heatmap (today's check-ins by hour)
-    const hours = new Array(24).fill(0);
-    for (const a of todayAtt) hours[new Date(a.created_at).getHours()]++;
-    const hmax = Math.max(1, ...hours);
-    // Branch leaderboard: per-gym sales + check-ins
-    const gymName = new Map((gyms ?? []).map((g) => [g.id, g.name]));
-    const board = new Map<string, { sales: number; n: number; att: number }>();
-    for (const r of salesRows) {
-      const e = board.get(r.gym_id) ?? { sales: 0, n: 0, att: 0 };
-      e.sales += signed(r); e.n++;
-      board.set(r.gym_id, e);
-    }
-    for (const a of attRows) {
-      const e = board.get(a.gym_id) ?? { sales: 0, n: 0, att: 0 };
-      e.att++;
-      board.set(a.gym_id, e);
-    }
-    const rows = [...board.entries()]
-      .map(([gid, e]) => ({ name: gymName.get(gid) ?? gid.slice(0, 8) + "…", ...e }))
-      .sort((a, b) => b.sales - a.sales);
+    const monthRev = Number(report.month_revenue_cents);
+    const todayRev = Number(report.today_revenue_cents);
+    const members = Number(report.active_members);
+    const ovBanner = subscriptionSummary(gyms ?? [], lics ?? []);
+    const days = report.daily.map(d => new Date(d.day + "T12:00:00+08:00").toLocaleDateString("en-PH", {month: "short", day: "numeric", timeZone: "Asia/Manila"}));
+    const dayTotals = report.daily.map(d => Number(d.total_cents)/100);
+    const prodName = new Map(report.top_products.map(p => [p.id,p.name]));
+    const top: [string,number][] = report.top_products.map(p => [p.id,Number(p.total_cents)/100]);
+    const hours = new Array<number>(24).fill(0);
+    for (const hour of report.hours) if (hour.hour>=0 && hour.hour<24) hours[hour.hour]=Number(hour.entries);
+    const hmax = Math.max(1,...hours);
+    const rows = report.branches.map(g => ({name:g.name,sales:Number(g.total_cents),n:Number(g.transactions),att:Number(g.checkins)})).sort((a,b)=>b.sales-a.sales);
     if (token !== viewToken || !root.isConnected) return; // …and again before the write
     for (const c of charts.splice(0)) c.destroy();
     root.innerHTML = `<div class="page-head"><h2>POS revenue & analytics</h2>
@@ -179,8 +109,8 @@ async function overview(root: HTMLElement, s: Session, token: number) {
       ${ovBanner}
       <div class="cards" id="ov-cards">
       ${stat("Month POS revenue", pesos(monthRev), "emerald", "money", "POS sales this calendar month (refunds subtracted, voids excluded)")}
-      ${stat("Today POS revenue", pesos(todayRev), "emerald", "chart", `${todaySales.length} sales today`)}
-      ${stat("Check-ins today", String(todayAtt.length), "sky", "zap", todayExits.length ? `${todayExits.length} exits · entries since midnight` : "gate entries since midnight")}
+      ${stat("Today POS revenue", pesos(todayRev), "emerald", "chart", `${report.today_transactions} transactions · Asia/Manila · complete totals`)}
+      ${stat("Check-ins today", String(report.today_checkins), "sky", "zap", `${report.today_exits} exits · since midnight Asia/Manila`)}
       ${stat("Active members", String(members ?? 0), "violet", "users", "across your gyms")}</div>
       <div class="charts-grid">
         <div class="glass-panel panel"><div class="stat-k" style="margin-bottom:8px">30-day revenue trend (₱)</div>
@@ -191,7 +121,7 @@ async function overview(root: HTMLElement, s: Session, token: number) {
       <div class="glass-panel panel">
         <div class="stat-top" style="margin-bottom:8px">
           <span class="stat-k">Hourly foot traffic — today</span>
-          <span class="muted" style="font-size:11px;font-family:Rajdhani,sans-serif;letter-spacing:0.8px">${todayAtt.length ? `${todayAtt.length} CHECK-INS LOGGED` : "SENSORS ACTIVE · STANDBY"}</span>
+          <span class="muted" style="font-size:11px;font-family:Rajdhani,sans-serif;letter-spacing:0.8px">${report.today_checkins} CHECK-INS · ASIA/MANILA</span>
         </div>
         <div class="bars traffic-bars">${hours.map((v, h) => `<div title="${String(h).padStart(2, "0")}:00 — ${v} entries" class="${v > 0 ? "active-hour" : ""}" style="height:${v > 0 ? Math.round((v / hmax) * 75) + 8 : 4}px"></div>`).join("")}</div>
         <div class="traffic-hours">
@@ -208,9 +138,9 @@ async function overview(root: HTMLElement, s: Session, token: number) {
       ${navcard("#/owner/catalog", "box", "violet", "Catalog", "products · pricing", String(nProducts ?? 0))}
       ${navcard("#/owner/plans", "money", "emerald", "Plans", "memberships", String(nPlans ?? 0))}
       ${navcard("#/owner/promos", "tag", "amber", "Promos", "active vouchers", String(nPromos ?? 0))}
-      ${navcard("#/owner/txns", "zap", "sky", "Live feed", "today's sales", String(todaySales.length))}
+      ${navcard("#/owner/txns", "zap", "sky", "Live feed", "today's transactions", String(report.today_transactions))}
       ${navcard("#/owner/staff", "users", "violet", "Staff", "terminal PINs", String(nStaff ?? 0))}
-      ${navcard("#/owner/keys", "key", "red", "Keys", "branch licenses", String(nKeys ?? 0))}</div>
+      ${navcard("#/owner/keys", "key", "red", "Subscriptions", "branch entitlements", String(nKeys ?? 0))}</div>
       <p class="muted">Full tables live under Live feed / Staff / Keys.</p>`;
     document.getElementById("ov-print")?.addEventListener("click", () => window.print());
     const grid = { color: "rgba(139, 92, 246, 0.12)" };
@@ -331,105 +261,79 @@ async function overview(root: HTMLElement, s: Session, token: number) {
   );
 }
 
+type Facility = { id: string; name: string; status: string; disabled?: boolean };
+type Subscription = { gym_id: string; expires_at: string; revoked: boolean; is_trial: boolean; tier?: string };
+function subscriptionSummary(gyms: Facility[], licenses: Subscription[]): string {
+  return gyms.map((gym) => {
+    const license = licenses.find((l) => l.gym_id === gym.id); // newest, including revoked
+    const expiry = license ? Date.parse(license.expires_at) : NaN;
+    const state = gym.disabled || gym.status === "rejected" ? "Suspended" : !license ? "No subscription" : license.revoked ? "Revoked"
+      : !Number.isFinite(expiry) ? "Invalid expiry" : Date.now() <= expiry ? "Active" : Date.now() <= expiry + 3 * 86400_000 ? "Three-day grace" : "Expired · terminal operations locked";
+    const active = state === "Active";
+    return `<div class="glass-panel panel" style="margin-bottom:12px">
+      <strong>${esc(gym.name)}</strong> · <span class="pill ${active ? "good" : "warn"}">${state}</span>
+      <p class="muted">${license?.is_trial ? "14-day trial" : "Subscription"}${license ? " · expires " + new Date(license.expires_at).toLocaleString() : ""}
+      · Facility review: ${esc(gym.status)}. Review is separate from subscription status.</p>
+      <a href="#/owner/start">Connect GymPOS</a> · <a href="#/owner/keys">Subscription & terminals</a></div>`;
+  }).join("");
+}
+
 async function keys(root: HTMLElement, s: Session) {
-  const [{ data: gyms }, { data, error }] = await Promise.all([
-    db().from("gyms").select("id,name,tier,disabled,status").order("name"),
-    scope(db().from("licenses").select("id,gym_id,revoked,expires_at,created_at,tier,price_usd,days_valid,is_trial").order("created_at", { ascending: false }), s),
-  ]);
-  const gym = (id: string) => gyms?.find((g) => g.id === id);
-  const now = Date.now();
-
-  const activeLic = (data ?? []).find((l) => !l.revoked);
-  let statusBanner = "";
-  if (activeLic) {
-    const exp = new Date(activeLic.expires_at).getTime();
-    const days = (exp - now) / 86400000;
-    const g = gym(activeLic.gym_id);
-    const isPending = g?.status === "pending";
-
-    if (isPending) {
-      statusBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid rgba(245,158,11,0.5);background:rgba(245,158,11,0.06)">
-        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <div>
-            <div class="row" style="gap:8px">
-              <span class="pulse-dot" style="background:#fbbf24"></span>
-              <strong style="color:#fbbf24;font-size:14px">APPLICATION PENDING CEO APPROVAL · 14-DAY TRIAL ACTIVE</strong>
-            </div>
-            <p class="muted" style="margin:4px 0 0;font-size:12px">Your trial key is running (${Math.max(0, Math.ceil(days))} days left). Once CEO verifies your facility, the 30-day official subscription countdown begins.</p>
-          </div>
-          <span class="pill warn">Trial License</span>
-        </div>
-      </div>`;
-    } else if (days <= 0 && days >= -3) {
-      const graceLeft = Math.ceil(3 + days);
-      statusBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.12)">
-        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <div>
-            <div class="row" style="gap:8px">
-              <span class="pulse-dot" style="background:#ef4444"></span>
-              <strong style="color:#ef4444;font-size:14px">⚠️ 3-DAY GRACE PERIOD RUNNING · ${graceLeft} DAY(S) BEFORE TERMINAL LOCKOUT</strong>
-            </div>
-            <p class="muted" style="margin:4px 0 0;font-size:12px">Your subscription expired on ${new Date(activeLic.expires_at).toLocaleDateString()}. Terminals will lock permanently after the 3-day grace period.</p>
-          </div>
-          <span class="pill bad">Grace Period Active</span>
-        </div>
-      </div>`;
-    } else if (days < -3) {
-      statusBanner = `<div class="glass-panel panel" style="margin-bottom:14px;border:1px solid #ef4444;background:rgba(239,68,68,0.2)">
-        <strong style="color:#ef4444;font-size:14px">❌ SUBSCRIPTION EXPIRED · GYMPOS TERMINALS LOCKED</strong>
-        <p class="muted" style="margin:4px 0 0;font-size:12px">Both your active period and 3-day grace period have passed. Terminals are in fail-closed lock.</p>
-      </div>`;
+  const token = viewToken;
+  const load = async () => {
+    const [{ data: gyms, error: gymError }, { data: licenses, error: licenseError }, { data: devices, error: deviceError }] = await Promise.all([
+      db().from("gyms").select("id,name,status,disabled").order("name"),
+      scope(db().from("current_subscriptions").select("gym_id,expires_at,revoked,is_trial,tier").order("created_at", { ascending: false }), s),
+      db().from("terminals").select("id,gym_id,name,active,last_seen_at").order("last_seen_at", { ascending: false }),
+    ]);
+    if (token !== viewToken || !root.isConnected) return;
+    if (gymError || licenseError || deviceError) {
+      root.innerHTML = `<p class="pill bad">${esc((gymError || licenseError || deviceError)!.message)}</p>`; return;
     }
-  }
+    root.innerHTML = `<h2>Subscription & connected terminals</h2>
+      <p class="muted">CEO approval reviews your facility. A paid subscription starts only after the CEO records payment. Renewal is delivered automatically to connected GymPOS terminals.</p>
+      ${subscriptionSummary(gyms ?? [], licenses ?? [])}
+      <h3>Terminals</h3><table><thead><tr><th>Facility</th><th>Terminal</th><th>Last cloud contact</th><th>Access</th></tr></thead><tbody>
+      ${(devices ?? []).map((device) => `<tr><td>${esc(gyms?.find((g) => g.id === device.gym_id)?.name || device.gym_id)}</td><td>${esc(device.name)}</td><td>${new Date(device.last_seen_at).toLocaleString()}</td><td>${device.active ? "Enabled" : "Revoked · contact CEO"}</td></tr>`).join("") || '<tr><td colspan="4">No terminals yet. Open GymPOS and sign in with your owner account.</td></tr>'}</tbody></table>
+      <p class="muted">Expiry beyond the three-day grace blocks normal terminal operations. Reconnect online at least every seven days. Emergency/free exit remains independent. Contact the CEO to confirm payment or resolve a suspension.</p>`;
+  };
+  await load();
+  pollVisible(() => token === viewToken && root.isConnected ? root : null, load, 30000);
+}
 
-  root.innerHTML = `<div class="page-head"><h2>Branch keys & licenses</h2><span class="muted">license inventory</span></div>
-    ${statusBanner}
-    <div class="glass-panel panel" style="margin-bottom:14px;border:1px solid rgba(139,92,246,0.3);background:rgba(139,92,246,0.04)">
-      <div class="stat-top" style="margin-bottom:6px">
-        <span class="stat-k" style="color:var(--cyan)">⚡ ZERO-FRICTION TERMINAL ACTIVATION</span>
-        <span class="pill good" style="font-size:11px">Cloud Sign-In Ready</span>
-      </div>
-      <p class="muted" style="margin:0 0 8px;font-size:13px">You do not need to manually copy 500-character keys anymore. Simply open <strong>GymPOS → Settings</strong> and click <strong>"Login with SLS Account"</strong> with your email and password to automatically license the terminal.</p>
-    </div>
-    ${error ? `<p class="pill bad">${esc(error.message)}</p>` : ""}
-    ${(gyms ?? []).some((g) => g.disabled) ? `<p class="pill bad">At least one gym is disabled — terminals are locked.</p>` : ""}
-    <table><thead><tr><th>Gym</th><th>Type</th><th>Tier</th><th>Key ID</th><th>Expires</th><th>Countdown</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-    ${(data ?? []).map((l) => {
-      const g = gym(l.gym_id);
-      const exp = new Date(l.expires_at).getTime();
-      const diffDays = (exp - now) / 86400000;
-      let countText = "";
-      let statusBadge = "";
-
-      if (l.revoked || g?.disabled) {
-        statusBadge = '<span class="pill bad">suspended</span>';
-        countText = "Revoked";
-      } else if (diffDays > 7) {
-        statusBadge = '<span class="pill good">active</span>';
-        countText = `${Math.ceil(diffDays)} days remaining`;
-      } else if (diffDays > 0) {
-        statusBadge = '<span class="pill warn" style="background:rgba(245,158,11,0.2);color:#fbbf24;border:1px solid rgba(245,158,11,0.4)">expiring soon</span>';
-        countText = `${Math.ceil(diffDays)} days left`;
-      } else if (diffDays >= -3) {
-        statusBadge = '<span class="pill bad" style="background:rgba(239,68,68,0.25);color:#ef4444;border:1px solid #ef4444;font-weight:700">3-day grace</span>';
-        countText = `${Math.ceil(3 + diffDays)}d grace left`;
-      } else {
-        statusBadge = '<span class="pill bad">expired</span>';
-        countText = "Expired";
-      }
-
-      return `<tr>
-        <td><strong>${esc(g?.name ?? l.gym_id.slice(0, 8) + "…")}</strong></td>
-        <td>${l.is_trial ? '<span class="stat-badge badge-basic">14-day trial</span>' : '<span class="stat-badge badge-pro">subscription</span>'}</td>
-        <td>${esc(l.tier ?? g?.tier ?? "—")}</td>
-        <td class="muted">${l.id.slice(0, 8)}…</td>
-        <td>${new Date(l.expires_at).toLocaleDateString()}</td>
-        <td style="font-weight:600;font-size:12px">${countText}</td>
-        <td>${statusBadge}</td>
-        <td>Cloud sign-in</td></tr>`;
-    }).join("") || `<tr><td colspan="8" class="muted">No keys for your gyms yet — submit an application or ask CEO.</td></tr>`}
-    </tbody></table>`;
-
+async function gettingStarted(root: HTMLElement, s: Session) {
+  const token = viewToken;
+  const [{ data: gyms }, { data: devices }, { count: products }, { count: plans }, { count: staff }, { data: release }] = await Promise.all([
+    db().from("gyms").select("id,name,status"),
+    db().from("terminals").select("id").eq("active", true),
+    scope(db().from("products").select("id", { count: "exact", head: true }), s),
+    scope(db().from("plans").select("id", { count: "exact", head: true }), s),
+    scope(db().from("staff").select("id", { count: "exact", head: true }).eq("active", true), s),
+    db().from("releases").select("version,download_url").eq("channel", "stable").gt("rollout_pct", 0).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  if (token !== viewToken || !root.isConnected) return;
+  const version = String(release?.version ?? "").match(/^(\d+)\.(\d+)\.(\d+)$/)?.slice(1).map(Number);
+  const accountReady = version && (version[0] > 3 || (version[0] === 3 && (version[1] > 0 || version[2] >= 4)));
+  const download = accountReady && release?.download_url && /^https:\/\//.test(release.download_url) ? `<a href="${esc(release.download_url)}" rel="noopener" target="_blank">Download GymPOS ${esc(release.version)}</a>` : "The account-activation installer (3.0.4 or later) is not published yet. Contact the CEO for the tested GymPOS installer.";
+  root.innerHTML = `<div class="page-head"><h2>Get started with your gym</h2></div>
+    <div class="glass-panel panel"><h3>Setup checklist</h3>
+      <ol style="line-height:2">
+        <li>${gyms?.length ? "✓" : "○"} Facility registered: ${esc(gyms?.map((g) => g.name).join(", ") || "Finish gym setup")}. Trial starts after verified registration.</li>
+        <li>${download}. Install on your Windows front-desk or gate terminal.</li>
+        <li>${devices?.length ? "✓" : "○"} Open GymPOS → Sign in with SLS account → select your gym → name the terminal. No license key or cloud URL is needed.</li>
+        <li>${products ? "✓" : "○"} <a href="#/owner/catalog">Add products</a> and stock. Prices are entered in pesos.</li>
+        <li>${plans ? "✓" : "○"} <a href="#/owner/plans">Set up membership plans</a>.</li>
+        <li>${staff ? "✓" : "○"} <a href="#/owner/staff">Create front-desk staff PINs</a>. These are separate from owner account credentials.</li>
+        <li>In GymPOS, test camera/controller connectivity, register a test member, and verify one entry and one sale before opening to customers.</li>
+      </ol></div>
+    <div class="glass-panel panel"><h3>Accounts explained</h3>
+      <p><strong>Owner:</strong> your dashboard and terminal-connection account. Keep its password private.</p>
+      <p><strong>Manager:</strong> an assigned dashboard account with operational access. Managers cannot activate a terminal; the owner connects it first.</p>
+      <p><strong>Staff PIN:</strong> identifies the front-desk operator on an already-connected terminal.</p>
+      <p><strong>Gym member:</strong> a customer membership, not a dashboard login.</p>
+      <h3>Trial, payment & recovery</h3><p>Your 14-day trial does not wait for CEO approval. CEO facility review and payment confirmation are separate. After payment is recorded, the 30-day subscription updates GymPOS automatically. An early paid renewal preserves remaining paid days.</p>
+      <p>If blocked: open GymPOS Account & Help, check the selected facility, correct the computer clock, reconnect the internet, and refresh. Check <a href="#/owner/keys">Subscription & Terminals</a> for expiry or revocation. Password recovery and verification resend are on the sign-in page.</p>
+      <p class="muted">Emergency/free exit is never dependent on a subscription. A hardware safety and release test is still required before using the system on a real door.</p></div>`;
 }
 
 async function catalog(root: HTMLElement, s: Session, token: number) {
@@ -654,11 +558,12 @@ async function staff(root: HTMLElement, s: Session, token: number) {
     ${stat("Managers", String(managers), "amber", "shield", "role = manager")}</div>
     <p class="muted">Staff unlock POS + check-ins on the terminal only. Revenue, keys, pricing stay protected. PINs hashed Argon2id (see sls-core::auth).</p>
     <div class="panel row">${gymSelectHtml(gyms, "gym")}<input id="fn" placeholder="Full name" /><input id="un" placeholder="username" />
-    <input id="pin" placeholder="6-12 digit PIN" maxlength="12" style="width:120px" />
+    <input id="pin" type="password" inputmode="numeric" autocomplete="new-password" placeholder="6-12 digit PIN" maxlength="12" style="width:120px" />
+    <select id="staff-role" aria-label="Terminal role"><option value="staff">Cashier / front desk</option><option value="manager">Terminal manager (manual entry & settings)</option></select>
     <button class="primary" id="add" ${canWrite ? "" : "disabled"}>Save credential</button></div>
     <p id="staff-msg" class="muted">${canWrite ? "" : "Read-only — staff credentials need a gym assigned to this account."}</p>
-    <table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Active</th></tr></thead><tbody>
-    ${(data ?? []).map((x) => `<tr><td>${esc(x.full_name)}</td><td>${esc(x.username)}</td><td>${esc(x.role)}</td><td>${x.active ? "yes" : "no"}</td></tr>`).join("")}
+    <table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Active</th><th></th></tr></thead><tbody>
+    ${(data ?? []).map((x) => `<tr><td>${esc(x.full_name)}</td><td>${esc(x.username)}</td><td>${esc(x.role)}</td><td>${x.active ? "yes" : "no"}</td><td>${canWrite ? `<button data-staff="${esc(x.id)}" data-active="${x.active}">${x.active ? "Deactivate" : "Reactivate"}</button>` : "Read-only"}</td></tr>`).join("")}
     </tbody></table>`;
   (document.getElementById("add") as HTMLButtonElement).onclick = async () => {
     const msg = document.getElementById("staff-msg")!;
@@ -677,10 +582,16 @@ async function staff(root: HTMLElement, s: Session, token: number) {
         full_name: (document.getElementById("fn") as HTMLInputElement).value,
         username: (document.getElementById("un") as HTMLInputElement).value,
         pin,
-        role: "staff",
+        role: (document.getElementById("staff-role") as HTMLSelectElement).value,
       }),
     });
     if (!res.ok) { msg.textContent = await res.text(); msg.style.color = "#f87171"; return; }
     if (shell) renderOwner(shell, "/staff", s);
   };
+  root.querySelectorAll<HTMLButtonElement>("[data-staff]").forEach(button => button.onclick = async () => {
+    button.disabled=true;
+    const {error}=await db().from("staff").update({active:button.dataset.active!=="true"}).eq("id",button.dataset.staff!);
+    if(error) { document.getElementById("staff-msg")!.textContent=error.message;button.disabled=false;return; }
+    if(shell) void renderOwner(shell,"/staff",s);
+  });
 }

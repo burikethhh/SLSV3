@@ -52,6 +52,7 @@ export function debounce<T extends (...a: never[]) => void>(fn: T, ms = 150): T 
 export function pollVisible(el: () => HTMLElement | null, fn: () => void | Promise<void>, ms = 60000): () => void {
   let timer: ReturnType<typeof setInterval> | null = null;
   let dead = false;
+  let running = false;
   const stop = () => {
     dead = true;
     if (timer) { clearInterval(timer); timer = null; }
@@ -60,11 +61,14 @@ export function pollVisible(el: () => HTMLElement | null, fn: () => void | Promi
   const start = () => {
     if (!dead && !timer && !document.hidden && el()) timer = setInterval(tick, ms);
   };
-  const tick = () => {
+  const tick = async () => {
     if (document.hidden || !el()) return stop();
-    void fn();
+    if (running) return;
+    running = true;
+    try { await fn(); } catch (error) { console.warn("Refresh failed", error); }
+    finally { running = false; }
   };
-  const onVis = () => { document.hidden ? (timer && (clearInterval(timer), (timer = null))) : start(); };
+  const onVis = () => { document.hidden ? (timer && (clearInterval(timer), (timer = null))) : (start(), void tick()); };
   document.addEventListener("visibilitychange", onVis);
   start();
   return stop;

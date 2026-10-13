@@ -21,19 +21,28 @@ pub fn is_clock_tampered(now_unix: i64, last_seen_unix: i64) -> bool {
 }
 
 pub fn is_heartbeat_expired(now_unix: i64, last_verify_unix: i64) -> bool {
-    last_verify_unix != 0 && now_unix - last_verify_unix > HEARTBEAT_SECONDS
+    last_verify_unix <= 0 || now_unix - last_verify_unix > HEARTBEAT_SECONDS
 }
 
 /// Stable device fingerprint. Mirrors orig `get_hwid()`:
 /// anchors = [MachineGuid, disk serial, validated MAC, hostname]
 /// → sorted(set) → sha256 → hex[:32]. Fallback `fallback-<host>` if <2 anchors.
 pub fn get_hwid() -> String {
+    static HWID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HWID.get_or_init(compute_hwid).clone()
+}
+fn compute_hwid() -> String {
     let mut anchors: Vec<String> = Vec::new();
 
     #[cfg(target_os = "windows")]
     {
         if let Ok(output) = std::process::Command::new("reg")
-            .args(["query", r"HKLM\SOFTWARE\Microsoft\Cryptography", "/v", "MachineGuid"])
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
             .output()
         {
             if output.status.success() {
@@ -85,7 +94,8 @@ pub fn get_hwid() -> String {
                 let parts: Vec<&str> = mac.split(':').collect();
                 if parts.len() == 6 {
                     if let Ok(first) = u8::from_str_radix(parts[0], 16) {
-                        if (first & 0x01) == 0 && (first & 0x02) == 0 && mac != "00:00:00:00:00:00" {
+                        if (first & 0x01) == 0 && (first & 0x02) == 0 && mac != "00:00:00:00:00:00"
+                        {
                             anchors.push(mac.replace(':', "").to_lowercase());
                             break;
                         }
@@ -110,7 +120,11 @@ pub fn get_hwid() -> String {
     let raw = anchors.join("|");
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
-    let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     hex.chars().take(32).collect()
 }
 
@@ -120,7 +134,11 @@ pub fn public_key_fingerprint(pem: &str) -> String {
     let norm: String = pem.chars().filter(|c| !c.is_whitespace()).collect();
     let mut hasher = Sha256::new();
     hasher.update(norm.as_bytes());
-    let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     hex.chars().take(24).collect()
 }
 
@@ -153,7 +171,8 @@ pub fn verify_token(token: &str, public_key_pem: &str) -> Result<LicenseClaims, 
         .verify(&claims_bytes, &signature)
         .map_err(|_| "Cryptographic signature verification failed".to_string())?;
 
-    serde_json::from_slice::<LicenseClaims>(&claims_bytes).map_err(|e| format!("JSON deserialization error: {e}"))
+    serde_json::from_slice::<LicenseClaims>(&claims_bytes)
+        .map_err(|e| format!("JSON deserialization error: {e}"))
 }
 
 pub struct LicenseManager {
@@ -186,13 +205,34 @@ impl LicenseManager {
         }
 
         let status = claims.evaluate(chrono::Utc::now());
-        if !matches!(status, LicenseStatus::Expired { .. } | LicenseStatus::Invalid { .. }) {
-            *self.current.write() = Some(claims);
-        }
+        *self.current.write() = Some(claims);
         Ok(status)
     }
 
     pub fn current_status(&self) -> LicenseStatus {
+        let now = chrono::Utc::now().timestamp();
+        let last = crate::db::last_heartbeat().unwrap_or(0);
+        if self.current.read().is_some() {
+            let seen = crate::db::get_setting("clock_high_water")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(last)
+                .max(last);
+            if is_clock_tampered(now, seen) {
+                return LicenseStatus::Invalid {
+                    reason: "Clock changed. Restore the correct time and reconnect.".into(),
+                };
+            }
+            if is_heartbeat_expired(now, last) {
+                return LicenseStatus::Invalid {
+                    reason: "Online verification required (seven-day offline limit).".into(),
+                };
+            }
+            if now > seen {
+                let _ = crate::db::set_setting("clock_high_water", &now.to_string());
+            }
+        }
         match &*self.current.read() {
             Some(c) => c.evaluate(chrono::Utc::now()),
             None => LicenseStatus::Unlicensed,
@@ -222,13 +262,16 @@ mod tests {
     /// verifier and (semantically) the Edge fn use (salt = SHA-256 digest size = 32),
     /// then verify through `verify_token`. Catches claims-shape drift + PSS param drift.
     /// Interop: this public PEM (from the Node-generated pair) must verify tokens
-/// signed by the Edge fn with saltLength=32. Covered by
-/// `license_sign_verify_roundtrip` + a Node PSS roundtrip on the same key.
+    /// signed by the Edge fn with saltLength=32. Covered by
+    /// `license_sign_verify_roundtrip` + a Node PSS roundtrip on the same key.
     #[test]
     fn license_sign_verify_roundtrip() {
         let mut rng = rand::thread_rng();
         let priv_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let pub_pem = priv_key.to_public_key().to_public_key_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        let pub_pem = priv_key
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
 
         let now = Utc::now();
         let claims = LicenseClaims {
@@ -273,12 +316,13 @@ mod tests {
         assert!(!is_clock_tampered(2000, 1000));
         assert!(!is_clock_tampered(1000, 0)); // never verified yet = no tamper
         assert!(is_heartbeat_expired(7 * 86400 + 100, 0 + 1)); // >7d offline
-        assert!(!is_heartbeat_expired(100, 0));
+        assert!(is_heartbeat_expired(100, 0));
     }
 
     /// Production interop: Edge-fn-issued token (env `TEST_LICENSE_TOKEN`)
     /// must verify against the embedded pubkey. Skipped when env unset.
     #[test]
+    #[ignore = "requires an explicitly supplied signing interoperability fixture"]
     fn production_token_verifies_with_embedded_key() {
         let Ok(token) = std::env::var("TEST_LICENSE_TOKEN") else {
             eprintln!("skip: TEST_LICENSE_TOKEN not set");
@@ -292,7 +336,10 @@ mod tests {
         // Manager apply must succeed (hwid empty → lock skipped) and report valid.
         let mgr = LicenseManager::new(None);
         let status = mgr.verify_and_apply(&token).expect("apply failed");
-        assert!(matches!(status, LicenseStatus::Valid { .. }), "got {status:?}");
+        assert!(
+            matches!(status, LicenseStatus::Valid { .. }),
+            "got {status:?}"
+        );
         assert!(mgr.current_claims().is_some());
     }
 }

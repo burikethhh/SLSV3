@@ -72,6 +72,8 @@ export async function initMembers() {
               Hunter Full Name
               <input id="mem-name" placeholder="e.g. Sung Jin-Woo" autocomplete="off" style="width:100%;margin-top:6px;font-size:14px" />
             </label>
+            <label for="mem-plan">Membership plan</label><select id="mem-plan" required><option value="">Waiting for synced plans…</option></select>
+            <p class="hint">The plan sets a membership expiry. Create plans in the dashboard and wait for sync. Record any membership payment through your approved process.</p>
 
             <div class="enroll-guidance">
               <div class="guidance-step">
@@ -122,6 +124,11 @@ export async function initMembers() {
   bindEnrollCamera();
   startEnrollLoop();
   await list();
+  if(invoke) {
+    const plans=await invoke("plans_list");const select=document.getElementById("mem-plan");const previous=select.value;
+    select.innerHTML='<option value="">Select a membership plan…</option>'+plans.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} · ${p.duration_days} days · ₱ ${(p.price_cents/100).toFixed(2)}</option>`).join("");
+    select.value=previous;
+  }
 }
 
 function bindEnrollCamera() {
@@ -372,7 +379,9 @@ async function enroll() {
     }
 
     const memberId = crypto.randomUUID();
-    await invoke("face_enroll", { member_id: memberId, full_name: name, embedding: scan.embedding });
+    const planId=document.getElementById("mem-plan")?.value;
+    if(!planId) throw new Error("Select a membership plan before enrolling. Create plans in the dashboard if none are available.");
+    await invoke("face_enroll", { member_id: memberId, full_name: name, embedding: scan.embedding, plan_id:planId });
 
     if (msg) {
       msg.textContent = `Successfully Enrolled “${name}” (${(scan.face_score * 100).toFixed(0)}% lock confidence).`;

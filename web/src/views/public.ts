@@ -15,11 +15,11 @@ export function renderLanding(root: HTMLElement) {
     </div>
     <div class="hero-kicker">SOLO LEVELING SYSTEM · GATE v3</div>
     <h1 class="hero-title">ARISE<span class="hero-caret">_</span></h1>
-    <p class="hero-sub">Face-gated Hunter Command Center. Offline-first terminal,
-    per-branch licensing with remote kill switch, live telemetry.</p>
+    <p class="hero-sub">Gym management dashboard and offline-capable GymPOS terminal.
+    Register, verify your email, and connect your gym with a 14-day trial.</p>
     <div class="row hero-cta">
       <a href="#/login"><button class="primary">Sign in</button></a>
-      <a href="#/verify-license"><button>Verify license</button></a>
+      <a href="#/register"><button>Create owner account · 14-day trial</button></a>
     </div>
     <div class="feat-grid">
       <div class="glass-panel feat">
@@ -35,7 +35,7 @@ export function renderLanding(root: HTMLElement) {
       <div class="glass-panel feat">
         <div class="icon-box tone-amber" style="margin-bottom:10px">${icon("key")}</div>
         <div class="feat-t">Licensing</div>
-        <div class="muted">Tiered keys, 7-day heartbeat, instant revoke.</div>
+        <div class="muted">Sign in with your owner account. Subscription changes reach connected terminals automatically.</div>
       </div>
       <div class="glass-panel feat">
         <div class="icon-box tone-emerald" style="margin-bottom:10px">${icon("chart")}</div>

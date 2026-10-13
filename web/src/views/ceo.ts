@@ -2,7 +2,7 @@
 // (gym picker → issue show-once → revoke), releases, audit, user RBAC.
 // Mutations go through Edge Fns (service_role) so RLS cannot no-op them.
 import { db } from "../supabase";
-import { maskKey, confirmModal, debounce, stat, tierBadge, navcard, emptyState, esc } from "../ui";
+import { maskKey, confirmModal, debounce, stat, tierBadge, navcard, emptyState, esc, pollVisible } from "../ui";
 
 let viewToken = 0;
 
@@ -18,56 +18,23 @@ async function callFn(name: string, body: unknown): Promise<Response> {
   return res;
 }
 
-const CEO_SECTIONS: [string, string][] = [
-  ["/", "sec-overview"], ["/fleet", "sec-fleet"], ["/keys", "sec-keys"],
-  ["/releases", "sec-releases"], ["/users", "sec-users"], ["/audit", "sec-audit"],
-];
-
-/** Single scrolling command page (v2 CEO dashboard pattern): metrics on top,
- *  every section collapsible. Hash routes still work — they scroll to the
- *  matching section after the full render. */
+let stopPolling: (() => void) | null = null;
 export async function renderCEO(root: HTMLElement, path: string) {
+  stopPolling?.(); stopPolling = null;
   const token = ++viewToken;
-  root.innerHTML = `
-    <div class="page-head"><h2>CEO command center</h2>
-      <span class="row">
-        <span class="pill good"><span class="pulse-dot" style="margin-right:6px"></span>fleet live</span>
-        <button id="ceo-print" class="btn-subtle" title="Print command center report">Print Report</button>
-        <button id="ceo-refresh">Refresh</button>
-      </span></div>
-    <section id="sec-overview"><div class="skel-stack"><div class="skel" style="height:118px"></div><div class="skel" style="height:118px"></div></div></section>
-    <details class="glass-panel panel cmd-section" open id="sec-fleet"><summary>Fleet</summary><div class="sec-body" id="sec-fleet-body"><div class="skel-stack"><div class="skel" style="height:44px"></div><div class="skel" style="height:44px"></div><div class="skel" style="height:44px"></div></div></div></details>
-    <details class="glass-panel panel cmd-section" open id="sec-keys"><summary>Key Vault</summary><div class="sec-body" id="sec-keys-body"><div class="skel-stack"><div class="skel" style="height:44px"></div><div class="skel" style="height:44px"></div><div class="skel" style="height:44px"></div></div></div></details>
-    <details class="glass-panel panel cmd-section" open id="sec-releases"><summary>Releases</summary><div class="sec-body" id="sec-releases-body"><div class="skel" style="height:64px"></div></div></details>
-    <details class="glass-panel panel cmd-section" id="sec-users"><summary>Users &amp; RBAC</summary><div class="sec-body" id="sec-users-body"><div class="skel-stack"><div class="skel" style="height:44px"></div><div class="skel" style="height:44px"></div></div></div></details>
-    <details class="glass-panel panel cmd-section" id="sec-audit"><summary>Audit</summary><div class="sec-body" id="sec-audit-body"><div class="skel-stack"><div class="skel" style="height:44px"></div><div class="skel" style="height:44px"></div><div class="skel" style="height:44px"></div></div></div></details>`;
-  (document.getElementById("ceo-refresh") as HTMLButtonElement).onclick = () => renderCEO(root, "/");
-  document.getElementById("ceo-print")?.addEventListener("click", () => window.print());
-  // Section gate: viewToken only invalidates CEO-internal navigation, so a
-  // CEO→owner hop mid-render must ALSO stop on the missing element —
-  // otherwise body() hands a null root to the section and it throws.
-  const section = async (id: string, fn: (el: HTMLElement) => Promise<unknown>): Promise<boolean> => {
-    if (token !== viewToken) return false;
-    const el = document.getElementById(id);
-    if (!el) return false;
-    await fn(el);
-    return true;
+  const route = path.split("/")[1] || "overview";
+  const titles: Record<string, string> = { overview: "CEO overview", fleet: "Applications & facilities", keys: "Subscriptions", terminals: "Registered terminals", releases: "Releases", users: "Accounts", audit: "Audit" };
+  root.innerHTML = `<div class="page-head"><h2>${titles[route] || titles.overview}</h2><button id="ceo-refresh">Refresh</button></div><div id="ceo-section"></div>`;
+  document.getElementById("ceo-refresh")!.onclick = () => void renderCEO(root, path);
+  const body = document.getElementById("ceo-section")!;
+  const loaders: Record<string, () => Promise<unknown>> = {
+    overview: () => overview(body), fleet: () => fleet(body, token), keys: () => keys(body),
+    terminals: () => terminals(body), releases: () => releases(body), users: () => users(body), audit: () => audit(body),
   };
-  // Sections are independent queries into independent containers — run them
-  // concurrently so one slow table doesn't serialize the whole page.
-  await Promise.all([
-    section("sec-overview", (el) => overview(el)),
-    section("sec-fleet-body", (el) => fleet(el, token)),
-    section("sec-keys-body", (el) => keys(el)),
-    section("sec-releases-body", (el) => releases(el)),
-    section("sec-users-body", (el) => users(el)),
-    section("sec-audit-body", (el) => audit(el)),
-  ]);
-  const hit = CEO_SECTIONS.find(([p]) => p !== "/" && path.startsWith(p));
-  const sec = document.getElementById(hit ? hit[1] : "sec-overview");
-  if (sec) {
-    if (sec instanceof HTMLDetailsElement) sec.open = true;
-    sec.scrollIntoView();
+  try { await (loaders[route] || loaders.overview)(); }
+  catch (error) { if (body.isConnected) body.innerHTML = `<p class="pill bad">${esc(String(error))}</p>`; }
+  if (["overview", "terminals", "audit"].includes(route)) {
+    stopPolling = pollVisible(() => token === viewToken && body.isConnected ? body : null, async () => { await loaders[route](); }, 30000);
   }
 }
 
@@ -171,7 +138,8 @@ async function fleet(root: HTMLElement, token: number) {
       .eq("status", "pending")
       .order("created_at", { ascending: false });
 
-    if (error || !pending || pending.length === 0) {
+    if (error) { c.innerHTML = `<p class="pill bad">Application refresh failed: ${esc(error.message)}</p>`; return; }
+    if (!pending || pending.length === 0) {
       c.innerHTML = `<div class="glass-panel panel" style="padding:12px 16px;border-left:4px solid #38bdf8">
         <span style="font-weight:600;color:#38bdf8">NO PENDING APPLICATIONS</span>
         <span class="muted" style="margin-left:8px;font-size:13px">— All gym owner registrations are reviewed and active.</span>
@@ -185,7 +153,7 @@ async function fleet(root: HTMLElement, token: number) {
           <span class="pulse-dot" style="background:#fbbf24"></span>
           <span class="stat-k" style="color:#fbbf24;font-size:14px;letter-spacing:1px">PENDING GYM OWNER APPLICATIONS (${pending.length})</span>
         </div>
-        <span class="muted" style="font-size:12px">Trial key issued · Awaiting CEO review to start official 30-day subscription</span>
+        <span class="muted" style="font-size:12px">Review and payment are separate. Approval does not change the trial.</span>
       </div>
       <table style="margin-top:8px"><thead><tr>
         <th>Gym Name</th><th>Location</th><th>Tier</th><th>Applicant Email</th><th>Applied</th><th>Action</th>
@@ -198,20 +166,27 @@ async function fleet(root: HTMLElement, token: number) {
         <td class="muted">${p.created_at ? new Date(p.created_at).toLocaleDateString() : "—"}</td>
         <td>
           <button class="primary" data-approve="${p.id}" style="padding:4px 12px;font-size:12px;background:#10b981;border-color:#059669">
-            ✓ Approve (Start 30-Day Sub)
-          </button>
+            Approve facility
+          </button><button data-reject="${p.id}">Reject application</button>
         </td>
       </tr>`).join("")}
       </tbody></table>
     </div>`;
 
+    c.querySelectorAll("[data-reject]").forEach((btn) => {
+      (btn as HTMLButtonElement).onclick = async () => {
+        if (!await confirmModal({ title: "Reject application?", body: "This blocks terminal access for the facility.", confirmLabel: "Reject", danger: true })) return;
+        try { await callFn("gym-admin", { action: "reject_application", gym_id: (btn as HTMLElement).dataset.reject, reason: "Rejected after CEO review" }); await drawPending(); await draw(); }
+        catch (error) { alert(String(error)); }
+      };
+    });
     c.querySelectorAll("[data-approve]").forEach((btn) => {
       (btn as HTMLButtonElement).onclick = async () => {
         const gymId = (btn as HTMLElement).dataset.approve!;
         const ok = await confirmModal({
           title: "Approve Gym Owner Application?",
-          body: "This will promote the gym to Active status, start their official 30-day production subscription, and verify the gym owner's account.",
-          confirmLabel: "Approve & Start 30-Day Sub",
+          body: "Approve this facility for paid subscriptions. Its trial stays unchanged. Confirm payment separately under Subscriptions.",
+          confirmLabel: "Approve facility",
         });
         if (!ok) return;
         (btn as HTMLButtonElement).disabled = true;
@@ -223,7 +198,7 @@ async function fleet(root: HTMLElement, token: number) {
         } catch (e) {
           alert(`Approval failed: ${e}`);
           (btn as HTMLButtonElement).disabled = false;
-          (btn as HTMLButtonElement).textContent = "✓ Approve (Start 30-Day Sub)";
+          (btn as HTMLButtonElement).textContent = "Approve facility";
         }
       };
     });
@@ -239,7 +214,7 @@ async function fleet(root: HTMLElement, token: number) {
     let query = db().from("gyms").select("id,name,tier,disabled,status,owner_email").order("name").limit(50);
     if (q) query = query.ilike("name", `%${q}%`);
     if (f === "disabled") query = query.eq("disabled", true);
-    if (f === "live") query = query.eq("disabled", false).neq("status", "pending");
+    if (f === "live") query = query.eq("disabled", false).eq("status", "active");
     if (f === "pending") query = query.eq("status", "pending");
     const { data, error } = await query;
     const tbEl = document.getElementById("tb");
@@ -255,7 +230,7 @@ async function fleet(root: HTMLElement, token: number) {
           ? '<span class="pill warn" style="background:rgba(245,158,11,0.2);color:#fbbf24;border:1px solid rgba(245,158,11,0.4)">pending review</span>'
           : g.disabled
           ? '<span class="pill bad">disabled</span>'
-          : '<span class="pill good">live</span>';
+          : g.status === "rejected" ? '<span class="pill bad">rejected</span>' : '<span class="pill good">approved facility</span>';
         const actionBtn = isPending
           ? `<button class="primary" data-quick-approve="${g.id}" style="padding:3px 8px;font-size:11px">Approve</button>`
           : `<button data-kill="${g.id}" data-off="${g.disabled}">${g.disabled ? "Enable" : "Kill"}</button>`;
@@ -273,6 +248,7 @@ async function fleet(root: HTMLElement, token: number) {
       (b as HTMLButtonElement).onclick = async () => {
         const id = (b as HTMLElement).dataset.quickApprove!;
         try {
+          if (!await confirmModal({ title: "Approve facility?", body: "Trial stays unchanged. Confirm payment separately under Subscriptions.", confirmLabel: "Approve" })) return;
           await callFn("gym-admin", { action: "approve_application", gym_id: id });
           await drawPending();
           await draw();
@@ -310,6 +286,7 @@ async function fleet(root: HTMLElement, token: number) {
   (document.getElementById("f") as HTMLSelectElement).onchange = draw;
   await drawPending();
   await draw();
+  stopPolling = pollVisible(() => token === viewToken && root.isConnected ? root : null, async () => { await drawPending(); await draw(); }, 30000);
 }
 
 async function toggleKill(gymId: string, currentlyOff: boolean) {
@@ -330,118 +307,80 @@ async function toggleKill(gymId: string, currentlyOff: boolean) {
 }
 
 async function keys(root: HTMLElement) {
-  const [{ data: gyms }, { data, error }] = await Promise.all([
-    db().from("gyms").select("id,name,tier").order("name"),
-    db()
-      .from("licenses")
-      .select("id,gym_id,revoked,expires_at,created_at,tier,owner_email,issued_by,price_usd,days_valid")
-      .order("created_at", { ascending: false })
-      .limit(50),
-  ]);
-  const gymName = (id: string) => gyms?.find((g) => g.id === id)?.name ?? id?.slice(0, 8) ?? "—";
-
-  root.innerHTML = `<p class="muted" style="margin-top:0">Vault lists inventory + accounting metadata. Tokens are show-once at issue. Revoke via Edge Function (service_role + audit).</p>
-    ${error ? `<p class="pill bad">${error.message}</p>` : ""}
-    <table><thead><tr><th>Gym</th><th>Tier</th><th>License</th><th>Price</th><th>Issued</th><th>Expires</th><th>By</th><th>Status</th><th></th></tr></thead><tbody>
-    ${(data ?? []).map((l) => `<tr>
-      <td>${gymName(l.gym_id)}</td>
-      <td>${tierBadge(l.tier)}</td>
-      <td class="muted">${maskKey(l.id)}</td>
-      <td>${l.price_usd ? `$${l.price_usd}` : "—"}</td>
-      <td class="muted">${l.created_at ? new Date(l.created_at).toLocaleDateString() : "—"}</td>
-      <td>${new Date(l.expires_at).toLocaleDateString()}</td>
-      <td class="muted">${l.issued_by || "—"}</td>
-      <td>${l.revoked ? '<span class="pill bad">revoked</span>' : '<span class="pill good">active</span>'}</td>
-      <td>${l.revoked ? "" : `<button data-rv="${l.id}">Revoke</button>`}</td></tr>`).join("")
-      || `<tr><td colspan="9" class="muted">No keys yet.</td></tr>`}
-    </tbody></table>
-
-    <h3>Issue key</h3>
-    <div class="panel row" style="flex-wrap:wrap;gap:8px">
-      <select id="gid"><option value="">— new gym (type name) —</option>
-        ${(gyms ?? []).map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join("")}
-      </select>
-      <input id="gn" placeholder="gym name" />
-      <select id="tier"><option>basic</option><option>pro</option><option>ultra</option></select>
-      <input id="days" type="number" min="1" max="3650" value="30" style="width:80px" title="days" />
-      <input id="oemail" placeholder="owner email (optional)" />
-      <button class="primary" id="issue">Issue</button>
-    </div>
-    <p id="issue-msg" class="muted"></p>
-    <div id="show-once" hidden></div>`;
-
-  root.querySelectorAll("[data-rv]").forEach((b) =>
-    (b as HTMLButtonElement).onclick = async () => {
-      const id = (b as HTMLElement).dataset.rv!;
-      if (!await confirmModal({ title: "Revoke license?", body: "Terminals holding this key lock on next sync (~30s).", confirmLabel: "Revoke", danger: true })) return;
-      try {
-        await callFn("license-revoke", { license_id: id, reason: "revoked from Key Vault" });
-        keys(root);
-      } catch (e) {
-        alert(String(e));
-      }
+  const { data: gyms, error } = await db().from("gyms").select("id,name,tier,status,disabled").order("name");
+  if (error) throw error;
+  root.innerHTML = `<p class="muted">Approve the facility first, then record payment to activate or renew 30 days. Connected terminals update automatically; no key distribution.</p>
+    <form id="subscription-form" class="glass-panel panel" style="display:grid;gap:12px;max-width:680px">
+      <label for="subscription-gym">Facility</label><select id="subscription-gym" required><option value="">Select an approved facility</option>${(gyms ?? []).filter((g) => g.status === "active" && !g.disabled).map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join("")}</select>
+      <div id="subscription-current" role="status">Select a facility to view its subscription.</div>
+      <label for="subscription-tier">Paid tier · USD</label><select id="subscription-tier"><option value="basic">Basic · $99/month</option><option value="pro">Pro · $199/month</option><option value="ultra">Ultra · $349/month</option></select>
+      <label for="payment-reference">Payment reference / receipt number</label><input id="payment-reference" required minlength="3" maxlength="500" />
+      <label><input id="payment-confirmed" type="checkbox" required /> I have verified receipt of payment.</label>
+      <button type="submit" class="primary" id="subscription-activate" disabled>Confirm payment & activate 30 days</button>
+      <p id="subscription-result" role="status" aria-live="polite"></p>
+    </form>`;
+  let previous: string | null = null;
+  let loaded = false;
+  let loadId = 0;
+  const picker = document.getElementById("subscription-gym") as HTMLSelectElement;
+  picker.onchange = async () => {
+    const request = ++loadId;
+    loaded = false;
+    const btn = document.getElementById("subscription-activate") as HTMLButtonElement;
+    btn.disabled = true;
+    const current = document.getElementById("subscription-current")!;
+    const id = picker.value;
+    if (!id) { current.textContent = "Select a facility."; return; }
+    (document.getElementById("subscription-tier") as HTMLSelectElement).value = gyms?.find((g) => g.id === id)?.tier ?? "basic";
+    const { data: license, error } = await db().from("licenses").select("id,expires_at,is_trial,revoked,tier")
+      .eq("gym_id", id).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(1).maybeSingle();
+    if (!current.isConnected || request !== loadId) return;
+    if (error) { current.textContent = error.message; return; }
+    previous = license?.id ?? null; loaded = true; btn.disabled = false;
+    current.innerHTML = license ? `<p>${license.is_trial ? "Trial" : "Paid"} · ${esc(license.tier)} · expires ${new Date(license.expires_at).toLocaleString()} · ${license.revoked ? "revoked" : Date.now() > Date.parse(license.expires_at) + 3 * 86400_000 ? "expired" : Date.now() > Date.parse(license.expires_at) ? "grace" : "active"}</p>
+      ${license.revoked ? "" : '<button type="button" id="subscription-revoke">Revoke subscription</button>'}` : "No subscription yet.";
+    document.getElementById("subscription-revoke")?.addEventListener("click", async () => {
+      if (!await confirmModal({ title: "Revoke subscription?", body: "Normal terminal operations lock on the next online verification.", confirmLabel: "Revoke", danger: true })) return;
+      try { await callFn("license-revoke", { license_id: previous, reason: "CEO subscription revocation" }); picker.dispatchEvent(new Event("change")); }
+      catch (error) { alert(String(error)); }
     });
-
-  (document.getElementById("gid") as HTMLSelectElement).onchange = () => {
-    const sel = (document.getElementById("gid") as HTMLSelectElement).value;
-    const nameIn = document.getElementById("gn") as HTMLInputElement;
-    if (sel) {
-      nameIn.value = gyms?.find((g) => g.id === sel)?.name ?? "";
-      nameIn.disabled = true;
-    } else {
-      nameIn.disabled = false;
-    }
   };
-
-  (document.getElementById("issue") as HTMLButtonElement).onclick = async () => {
-    const msg = document.getElementById("issue-msg")!;
-    const show = document.getElementById("show-once")!;
-    const gym_id = (document.getElementById("gid") as HTMLSelectElement).value || null;
-    const gym_name = (document.getElementById("gn") as HTMLInputElement).value.trim();
-    const tier = (document.getElementById("tier") as HTMLSelectElement).value;
-    const days_valid = Number((document.getElementById("days") as HTMLInputElement).value) || 30;
-    const owner_email = (document.getElementById("oemail") as HTMLInputElement).value.trim();
-    if (!gym_name) { msg.textContent = "Gym name required."; return; }
-    msg.textContent = "Issuing…";
-    show.hidden = true;
+  (document.getElementById("subscription-form") as HTMLFormElement).onsubmit = async (e) => {
+    e.preventDefault(); if (!loaded) return;
+    const btn = document.getElementById("subscription-activate") as HTMLButtonElement;
+    if (btn.disabled) return; btn.disabled = true;
+    picker.disabled = true;
+    const result = document.getElementById("subscription-result")!;
     try {
-      const res = await callFn("license-issue", {
-        gym_id,
-        gym_name,
-        tier,
-        days_valid,
-        owner_email,
-        create_gym: !gym_id,
+      const response = await callFn("license-issue", {
+        gym_id: picker.value, tier: (document.getElementById("subscription-tier") as HTMLSelectElement).value,
+        previous_license_id: previous, payment_confirmed: (document.getElementById("payment-confirmed") as HTMLInputElement).checked,
+        payment_reference: (document.getElementById("payment-reference") as HTMLInputElement).value.trim(),
       });
-      const out = await res.json();
-      msg.textContent = `Issued ${out.tier} key · $${out.price_usd}/mo · expires ${new Date(out.expires_at).toLocaleDateString()} · gym ${out.gym_id}`;
-      msg.style.color = "#3ddc97";
-      show.hidden = false;
-      show.innerHTML = `<div class="quest">
-        <div class="quest-title">[ QUEST REWARD ] — LICENSE KEY</div>
-        <div class="muted" style="margin-bottom:8px">Copy this key now — it will not be shown again.</div>
-        <div class="row" style="margin-top:8px">
-          <textarea id="tok" rows="4" style="width:100%;font-family:monospace">${out.token}</textarea>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <button class="primary" id="copy-tok">Copy key</button>
-          <button id="ack">I saved it</button>
-        </div></div>`;
-      (document.getElementById("copy-tok") as HTMLButtonElement).onclick = () => {
-        navigator.clipboard?.writeText(out.token);
-        (document.getElementById("copy-tok") as HTMLButtonElement).textContent = "Copied";
-      };
-      (document.getElementById("ack") as HTMLButtonElement).onclick = () => {
-        show.innerHTML = "";
-        show.hidden = true;
-        keys(root);
-      };
-      // Refresh vault without wiping the show-once panel: only table is rebuilt on ack.
-    } catch (e) {
-      msg.textContent = String(e);
-      msg.style.color = "#ff6b6b";
-    }
+      const paid = await response.json();
+      loaded = false;
+      result.textContent = `Subscription activated through ${new Date(paid.expires_at).toLocaleString()}. GymPOS updates automatically.`;
+      (document.getElementById("payment-confirmed") as HTMLInputElement).checked = false;
+      (document.getElementById("payment-reference") as HTMLInputElement).value = "";
+    } catch (error) { loaded = false; result.textContent = String(error) + " Refresh the facility before retrying."; }
+    finally { picker.disabled = false; picker.dispatchEvent(new Event("change")); }
   };
+}
+
+async function terminals(root: HTMLElement) {
+  const { data, error } = await db().from("terminals").select("id,gym_id,name,active,last_seen_at,gyms(name)").order("last_seen_at", { ascending: false }).limit(500);
+  if (error) throw error;
+  root.innerHTML = `<p class="muted">Revoked terminals cannot reconnect themselves. Re-enable only after reviewing the device.</p>
+    <table><thead><tr><th>Facility</th><th>Terminal</th><th>Last contact</th><th>Access</th><th>Action</th></tr></thead><tbody>
+    ${(data ?? []).map((device) => `<tr><td>${esc((device.gyms as unknown as { name: string })?.name || device.gym_id)}</td><td>${esc(device.name)}</td><td>${new Date(device.last_seen_at).toLocaleString()}</td><td>${device.active ? "Enabled" : "Revoked"}</td><td><button data-terminal="${device.id}" data-active="${device.active}">${device.active ? "Revoke" : "Re-enable"}</button></td></tr>`).join("") || '<tr><td colspan="5">No connected terminals yet.</td></tr>'}</tbody></table>`;
+  root.querySelectorAll("[data-terminal]").forEach((element) => {
+    (element as HTMLButtonElement).onclick = async () => {
+      const active = (element as HTMLElement).dataset.active === "true";
+      if (!await confirmModal({ title: active ? "Revoke terminal?" : "Re-enable terminal?", body: "This changes access for this device only.", confirmLabel: active ? "Revoke" : "Enable", danger: active })) return;
+      try { await callFn("gym-admin", { action: "set_terminal_active", terminal_id: (element as HTMLElement).dataset.terminal, active: !active, reason: "CEO device review" }); await terminals(root); }
+      catch (error) { alert(String(error)); }
+    };
+  });
 }
 
 async function releases(root: HTMLElement) {
@@ -499,60 +438,57 @@ async function audit(root: HTMLElement) {
 }
 
 async function users(root: HTMLElement) {
-  root.innerHTML = `<p class="muted" style="margin-top:0">Self-registered accounts have no role until granted here (JWT claims) or via first-CEO bootstrap.</p>
-    <div id="u-list" class="muted">Loading users…</div>
-    <div class="panel row" style="margin-top:12px"><input id="uemail" placeholder="user email" />
-    <select id="urole"><option>owner</option><option>manager</option><option>ceo</option><option value="">remove role</option></select>
-    <input id="ugyms" placeholder="gym_ids CSV (optional)" style="min-width:240px" />
-    <button class="primary" id="ugrant">Grant role</button>
-    <span id="umsg" class="muted"></span></div>
-    <p class="muted">Owner needs ≥1 gym_id in JWT to pass RLS. CEO is first-user via <a href="#/login">bootstrap</a> on login page.</p>`;
-
-  // Directory — was a write-only form: you could grant a role to an email you
-  // already knew, but never see who had one or pick a user.
-  try {
-    const res = await callFn("user-admin", { action: "list" });
-    const out = await res.json() as { users: { email: string | null; role: string | null; gym_ids: string[] }[] };
-    const list = document.getElementById("u-list");
-    if (!list) return;
-    list.innerHTML = `<table><thead><tr><th>Email</th><th>Role</th><th>Gym IDs</th><th></th></tr></thead><tbody>
-      ${out.users.map((u) => `<tr>
-        <td>${esc(u.email ?? "—")}</td>
-        <td>${u.role ? `<span class="pill ${u.role === "ceo" ? "good" : "warn"}">${esc(u.role)}</span>` : '<span class="pill bad">none</span>'}</td>
-        <td class="muted">${u.gym_ids.length ? u.gym_ids.map((g) => g.slice(0, 8)).join(", ") + (u.gym_ids.length > 1 ? "…" : "") : "—"}</td>
-        <td>${u.email ? `<button data-use="${esc(u.email)}" data-role="${esc(u.role ?? "")}" data-gyms="${esc(u.gym_ids.join(","))}">Edit</button>` : ""}</td>
-      </tr>`).join("") || `<tr><td colspan="4" class="muted">No users yet.</td></tr>`}
-    </tbody></table>`;
-    list.querySelectorAll("[data-use]").forEach((b) =>
-      (b as HTMLButtonElement).onclick = () => {
-        (document.getElementById("uemail") as HTMLInputElement).value = (b as HTMLElement).dataset.use!;
-        const role = (b as HTMLElement).dataset.role;
-        if (role === "owner" || role === "manager" || role === "ceo") (document.getElementById("urole") as HTMLSelectElement).value = role;
-        else (document.getElementById("urole") as HTMLSelectElement).value = "";
-        (document.getElementById("ugyms") as HTMLInputElement).value = (b as HTMLElement).dataset.gyms ?? "";
-      });
-  } catch (e) {
-    const list = document.getElementById("u-list");
-    if (list) list.textContent = `Could not load users: ${String((e as Error).message ?? e)}`;
-  }
-
-  (document.getElementById("ugrant") as HTMLButtonElement).onclick = async () => {
-    const msg = document.getElementById("umsg")!;
-    const email = (document.getElementById("uemail") as HTMLInputElement).value.trim();
-    const role = (document.getElementById("urole") as HTMLSelectElement).value;
-    const gym_ids = (document.getElementById("ugyms") as HTMLInputElement).value
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (!email) { msg.textContent = "Email required."; return; }
-    try {
-      // Empty select = demote (strip RBAC claims; account can still sign in).
-      await callFn("user-admin", { email, role: role === "" ? null : role, gym_ids });
-      msg.textContent = role === "" ? `Removed role from ${email}. They keep old access until they sign out/in.` : `Granted ${role} to ${email}. They must sign out/in to pick it up.`;
-      msg.style.color = "#3ddc97";
-    } catch (e) {
-      msg.textContent = String(e);
-      msg.style.color = "#ff6b6b";
-    }
+  const { data: gyms, error } = await db().from("gyms").select("id,name,location").order("name").limit(1000);
+  if (error) throw error;
+  const facilities = gyms ?? [];
+  const names = new Map(facilities.map(g => [g.id, g.name]));
+  root.innerHTML = `<p class="muted">Gym owners register and verify their email, then receive their trial automatically. Use this page to assign existing verified accounts, add dashboard managers, or appoint another CEO. Staff PINs are managed under Staff, not here.</p>
+    <div id="u-list">Loading accounts…</div><div class="row"><button id="u-prev">Previous page</button><span id="u-page"></span><button id="u-next">Next page</button></div>
+    <form id="u-form" class="panel account-access-form"><label for="uemail">Existing account email</label><input id="uemail" type="email" required autocomplete="off" />
+    <label for="urole">Dashboard access</label><select id="urole"><option value="owner">Owner · manage and connect GymPOS</option><option value="manager">Manager · read-only dashboard</option><option value="ceo">CEO · administer all facilities</option><option value="">Remove dashboard access</option></select>
+    <fieldset id="ugyms"><legend>Assigned facilities (owner or manager)</legend>${facilities.map(g => `<label><input type="checkbox" value="${esc(g.id)}" /> ${esc(g.name)} · ${esc(g.location || "No location")}</label>`).join("") || "Create a facility first."}</fieldset>
+    <button class="primary" id="ugrant">Save account access</button><p id="umsg" role="status"></p></form>
+    <p class="muted">The server applies assignment removal immediately, including already signed-in clients. The last CEO cannot be removed. Account assignment alone does not create a paid subscription.</p>`;
+  let page = 1, busy = false;
+  const load = async () => {
+    const out = await (await callFn("user-admin", { action: "list", page })).json() as {
+      users: { email: string | null; role: string | null; gym_ids: string[]; verified: boolean }[]; has_more: boolean;
+    };
+    if (!root.isConnected) return;
+    document.getElementById("u-page")!.textContent = `Page ${page}`;
+    (document.getElementById("u-prev") as HTMLButtonElement).disabled = page === 1;
+    (document.getElementById("u-next") as HTMLButtonElement).disabled = !out.has_more;
+    const list = document.getElementById("u-list")!;
+    list.innerHTML = `<table><thead><tr><th>Email</th><th>Access</th><th>Facilities</th><th></th></tr></thead><tbody>${out.users.map(u => `<tr>
+      <td>${esc(u.email ?? "—")} · ${u.verified ? "Verified" : "Email pending"}</td><td>${esc(u.role ?? "Not assigned")}</td>
+      <td>${u.role === "ceo" ? "All facilities" : u.gym_ids.map(g => esc(names.get(g) ?? "Unavailable facility")).join(", ") || "—"}</td>
+      <td>${u.email ? `<button data-use="${esc(u.email)}" data-role="${esc(u.role ?? "")}" data-gyms="${esc(u.gym_ids.join(","))}">Edit</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="4">No accounts on this page.</td></tr>'}</tbody></table>`;
+    list.querySelectorAll<HTMLButtonElement>("[data-use]").forEach(button => button.onclick = () => {
+      (document.getElementById("uemail") as HTMLInputElement).value = button.dataset.use!;
+      (document.getElementById("urole") as HTMLSelectElement).value = button.dataset.role!;
+      const selected = (button.dataset.gyms ?? "").split(",");
+      document.querySelectorAll<HTMLInputElement>("#ugyms input").forEach(box => box.checked = selected.includes(box.value));
+    });
   };
+  for (const [id, offset] of [["u-prev", -1], ["u-next", 1]] as const) {
+    (document.getElementById(id) as HTMLButtonElement).onclick = async () => {
+      if (busy) return; busy = true;
+      try { page += offset; await load(); } catch (e) { document.getElementById("umsg")!.textContent = String(e); }
+      finally { busy = false; }
+    };
+  }
+  (document.getElementById("u-form") as HTMLFormElement).onsubmit = async event => {
+    event.preventDefault(); if (busy) return;
+    const email = (document.getElementById("uemail") as HTMLInputElement).value.trim();
+    const role = (document.getElementById("urole") as HTMLSelectElement).value || null;
+    const gym_ids = Array.from(document.querySelectorAll<HTMLInputElement>("#ugyms input:checked")).map(box => box.value);
+    const msg = document.getElementById("umsg")!;
+    if ((role === "owner" || role === "manager") && !gym_ids.length) { msg.textContent = "Select at least one named facility."; return; }
+    if (!confirm(`Save ${role ?? "no dashboard"} access for ${email}?`)) return;
+    busy = true; (document.getElementById("ugrant") as HTMLButtonElement).disabled = true;
+    try { await callFn("user-admin", { email, role, gym_ids }); msg.textContent = "Account access saved and audited."; await load(); }
+    catch (e) { msg.textContent = String((e as Error).message ?? e); }
+    finally { busy = false; (document.getElementById("ugrant") as HTMLButtonElement).disabled = false; }
+  };
+  try { await load(); } catch (e) { document.getElementById("u-list")!.textContent = `Could not load accounts: ${String(e)}`; }
 }

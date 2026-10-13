@@ -1,5 +1,11 @@
 # Recycled → v3 map (orig `SLSNIKETH` → SLS v3 production tree)
 
+## Current account-first implementation (2026-10-13)
+
+Read [Account-first implementation and Gemini release handoff](ACCOUNT-FIRST-IMPLEMENTATION-2026-10-13.md) before using the historical activation instructions below. The local 3.0.4 source uses owner-account sign-in, explicit facility selection, registered terminals, and automatic subscription refresh. Manual key/cloud-URL setup and `boot_license` descriptions below are historical. CEO facility approval no longer issues a paid subscription: recorded payment confirmation is a separate action.
+
+Migrations 0013–0016 and matching functions/dashboard are deployed. GymPOS 3.0.4 has a verified signed updater installer. Live-terminal upgrades require the explicit backed-up recovery procedure in the handoff. The owner authorized Codex to complete rollout and commit/push reviewed application changes; staff PIN visual redesign and listed qualification/backlog items remain open.
+
 Source snapshot: `C:\Users\ketha\AppData\Local\Temp\opencode\SLSNIKETH-orig`
 Each entry: what was kept verbatim-adapted, what was slimmed/dropped, and why.
 

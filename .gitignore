@@ -1,4 +1,5 @@
 /target/
+/.vercel/
 **/target/
 *.onnx
 desktop/models/

@@ -1,26 +1,21 @@
-// Settings — PIN-gated license/cloud config (terminal-PIN architecture:
-// locked once staff rows arrive via sync; fresh installs stay open so the
-// FIRST license can be applied). Also: update check, sync/DLQ status,
-// controller reconnect.
+// Native manager-session gated settings. Account activation is separate.
 const invoke = window.__TAURI__?.core?.invoke;
 
-const DEFAULT_URL = "https://tlfytevjhzcgrttcdipq.supabase.co";
 let unlocked = false; // session-only; a restart re-locks
 
 export async function initSettings() {
   const root = document.getElementById("view-settings");
   if (!root) return;
-  if (!root.dataset.bound) {
-    root.dataset.bound = "1";
-    // In preview mode default to locked once so touch keypad is visible and interactive
-    const locked = invoke ? await invoke("settings_lock_state").catch(() => false) : true;
-    if (locked && !unlocked) {
+  const locked = invoke ? await invoke("settings_lock_state").catch(() => true) : true;
+  if (locked) {
+    unlocked = false;
+    if (root.dataset.mode !== "lock") {
       renderLock(root);
-      await showStatus(root);
-      return;
     }
+    await showStatus(root);
+    return;
   }
-  if (!root.dataset.mode) {
+  if (root.dataset.mode !== "settings") {
     renderSettings(root);
     await refresh();
     return;
@@ -45,7 +40,7 @@ function renderLock(root) {
       <label>Staff Username <input id="lock-user" value="admin" autocomplete="off" style="width:100%" /></label>
       <label>PIN Code
         <div class="pin-display-wrap">
-          <input id="lock-pin" class="pin-display" type="password" inputmode="numeric" maxlength="6" placeholder="••••" style="width:100%" />
+          <input id="lock-pin" class="pin-display" type="password" inputmode="numeric" maxlength="12" placeholder="6–12 digit PIN" style="width:100%" />
         </div>
       </label>
       <div class="pin-grid">
@@ -79,7 +74,7 @@ function renderLock(root) {
         pinInput.value = "";
       } else if (v === "back") {
         pinInput.value = pinInput.value.slice(0, -1);
-      } else if (pinInput.value.length < 6) {
+      } else if (pinInput.value.length < 12) {
         pinInput.value += v;
       }
       pinInput.dispatchEvent(new Event("input"));
@@ -93,7 +88,8 @@ function renderLock(root) {
     if (!username || !pin) { msg.textContent = "Username and PIN required."; msg.style.color = "#fbbf24"; return; }
     try {
       if (invoke) {
-        await invoke("staff_verify", { username, pin });
+        const role = await invoke("staff_verify", { username, pin });
+        if (!["manager", "owner"].includes(role)) throw new Error("Cashier signed in. Terminal settings require a manager PIN.");
       }
       unlocked = true;
       delete root.dataset.mode;
@@ -112,239 +108,29 @@ function renderLock(root) {
 
 function renderSettings(root) {
   root.dataset.mode = "settings";
-  root.innerHTML = `
-    <h2>Settings — License &amp; Cloud Gateway</h2>
-    <div style="display:flex;flex-direction:column;gap:14px;max-width:680px;margin-top:12px">
-      <div class="glass panel" style="border: 1px solid rgba(139, 92, 246, 0.4); background: rgba(139, 92, 246, 0.05);">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <h3 style="margin:0;font-size:1.15rem;color:var(--brand);letter-spacing:1px">DIRECT CLOUD ACTIVATION</h3>
-          <span class="badge badge-pro" style="font-size:11px">Zero Friction</span>
-        </div>
-        <p class="hint" style="margin:0 0 12px">Sign in with your SLS Account to automatically fetch your gym's trial or production license and license GymPOS without copying keys.</p>
-        <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
-          <div>
-            <label style="font-size:12px;color:var(--muted)">SLS Account Email</label>
-            <input id="cloud-email" type="email" placeholder="owner@gym.com" style="width:100%" />
-          </div>
-          <div>
-            <label style="font-size:12px;color:var(--muted)">Password</label>
-            <input id="cloud-pass" type="password" placeholder="••••••••" style="width:100%" />
-          </div>
-        </div>
-        <button id="cloud-login-btn" class="primary" style="width:100%;height:42px;font-weight:700;font-size:14px">
-          ⚡ Login with SLS Account &amp; License GymPOS
-        </button>
-        <div id="cloud-msg" class="hint" style="margin-top:8px"></div>
-      </div>
-
-      <div class="glass panel">
-        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">MANUAL LICENSE KEY &amp; HUNTER GUILD RANK</h3>
-        <label>Terminal License Key (GPOS-…) <textarea id="set-token" rows="3" style="width:100%;font-family:monospace" placeholder="GPOS-…"></textarea></label>
-        <div style="margin-top:10px">
-          <button id="set-apply" class="primary">Apply &amp; Verify License</button>
-        </div>
-        <p id="set-msg" class="hint" style="margin-top:8px"></p>
-        <div id="set-status" class="hint" style="margin-top:8px"></div>
-      </div>
-
-      <div class="glass panel">
-        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">CLOUD GATEWAY CONNECTION</h3>
-        <label>Supabase Gateway URL <input id="set-url" placeholder="${DEFAULT_URL}" style="width:100%" /></label>
-        <div style="margin-top:10px">
-          <button id="set-save-url">Save URL Only</button>
-        </div>
-      </div>
-
-      <div class="glass panel">
-        <h3 style="margin:0 0 10px;font-size:1.1rem;color:var(--cyan);letter-spacing:1px">TERMINAL HARDWARE &amp; RELEASES</h3>
-        <div class="row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <button id="set-update">Check For Updates</button>
-          <button id="set-hw">Reconnect ESP32 Controller</button>
-          <span id="set-extra" class="hint"></span>
-        </div>
-        <div id="set-update-result" class="hint" style="margin-top:8px"></div>
-        <div id="set-restart" style="margin-top:8px"></div>
-      </div>
-    </div>`;
-
-  bindActions();
-}
-
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRsZnl0ZXZqaHpjZ3J0dGNkaXBxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEwODgzNTksImV4cCI6MjEwNjY2NDM1OX0.oS15b2wahLDuSeMZ99NX2toZrOFvEOfe2ddYnRwiwc4";
-
-async function bindActions() {
-  const url = await invoke?.("settings_get", { key: "supabase_url" }).catch(() => null);
-  document.getElementById("set-url").value = url || DEFAULT_URL;
-
-  // ── Direct Cloud Sign-In & Activation ──
-  document.getElementById("cloud-login-btn").onclick = async () => {
-    const email = document.getElementById("cloud-email").value.trim();
-    const password = document.getElementById("cloud-pass").value;
-    const supabaseUrl = document.getElementById("set-url").value.trim() || DEFAULT_URL;
-    const msg = document.getElementById("cloud-msg");
-    if (!email || !password) {
-      msg.textContent = "Please enter both your SLS account email and password.";
-      msg.style.color = "#fbbf24";
-      return;
-    }
-    if (supabaseUrl !== DEFAULT_URL && !/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(supabaseUrl.replace(/\/$/, ""))) {
-      msg.textContent = "Unsupported cloud URL. Use the official SLS Supabase project.";
-      msg.style.color = "#ff6b6b";
-      return;
-    }
-    msg.textContent = "Signing in with SLS Cloud…";
-    msg.style.color = "#38bdf8";
-
-    try {
-      // 1. Authenticate with Supabase Auth
-      const authRes = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
-        body: JSON.stringify({ email, password }),
-      });
-      if (!authRes.ok) {
-        const err = await authRes.json().catch(() => ({}));
-        throw new Error(err.error_description || err.msg || "Authentication failed. Please check credentials.");
-      }
-      const authData = await authRes.json();
-      const accessToken = authData.access_token;
-
-      msg.textContent = "Authenticated! Fetching assigned license key from cloud…";
-
-      // 2. Fetch the token through the authenticated Edge Function. raw_token
-      // is intentionally not exposed through PostgREST grants.
-      const licRes = await fetch(`${supabaseUrl}/functions/v1/license-fetch`, {
-        method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: "{}",
-      });
-      if (!licRes.ok) throw new Error("Could not fetch licenses: " + (await licRes.text()));
-      const licenses = (await licRes.json()).licenses;
-      if (!licenses || licenses.length === 0) {
-        throw new Error("No license key found for this account. If you just registered, your application is pending review or no gym is linked.");
-      }
-
-      const lic = licenses.find((l) => !l.revoked) || licenses[0];
-      if (lic.revoked) {
-        throw new Error("License has been revoked by system administration. Terminal locked.");
-      }
-
-      const now = Date.now();
-      const exp = new Date(lic.expires_at).getTime();
-      const diffDays = (exp - now) / 86400000;
-
-      if (diffDays < -3) {
-        throw new Error(`License expired on ${new Date(lic.expires_at).toLocaleDateString()} and 3-day grace period has elapsed. Please renew subscription on web portal.`);
-      }
-
-      if (!lic.raw_token) {
-        throw new Error("License record exists but key token is missing. Please contact CEO.");
-      }
-
-      // 3. Apply license via Tauri invoke
-      if (invoke) {
-        await invoke("license_apply", { token: lic.raw_token, supabase_url: supabaseUrl });
-      }
-
-      const typeStr = lic.is_trial ? "14-Day Free Trial" : "30-Day Official Subscription";
-      if (diffDays <= 0 && diffDays >= -3) {
-        const graceLeft = Math.ceil(3 + diffDays);
-        msg.innerHTML = `⚠️ <strong style="color:#ffd166">3-Day Grace Period Active (${graceLeft}d left)</strong><br/>` +
-          `Account: ${escapeHtml(email)} · ${lic.tier.toUpperCase()} Tier (${typeStr})<br/>` +
-          `GymPOS licensed and active under grace period!`;
-        msg.style.color = "#ffd166";
-      } else {
-        const daysLeft = Math.ceil(diffDays);
-        msg.innerHTML = `✅ <strong style="color:#3ddc97">Terminal Successfully Licensed!</strong><br/>` +
-          `Account: ${escapeHtml(email)} · ${lic.tier.toUpperCase()} Tier (${typeStr})<br/>` +
-          `${daysLeft} days remaining on subscription.<br/>` +
-          `<span style="font-size:11px;color:#94a3b8">Terminals and gates are now fully operational.</span>`;
-        msg.style.color = "#3ddc97";
-      }
-
-      document.getElementById("cloud-pass").value = "";
-      await refresh();
-    } catch (e) {
-      msg.textContent = String(e.message || e);
-      msg.style.color = "#ff6b6b";
-    }
-  };
-
-  document.getElementById("set-apply").onclick = async () => {
-    const msg = document.getElementById("set-msg");
-    const token = document.getElementById("set-token").value.trim();
-    const supabaseUrl = document.getElementById("set-url").value.trim();
-    if (!token) { msg.textContent = "Paste a license key first."; return; }
-    msg.textContent = "Verifying…";
-    try {
-      const result = await invoke("license_apply", { token, supabase_url: supabaseUrl });
-      msg.textContent = `Applied: ${result}`;
-      msg.style.color = "#3ddc97";
-      document.getElementById("set-token").value = "";
-    } catch (e) {
-      msg.textContent = String(e);
-      msg.style.color = "#ff6b6b";
-    }
-    await refresh();
-  };
-
-  document.getElementById("set-save-url").onclick = async () => {
-    const msg = document.getElementById("set-msg");
-    try {
-      await invoke("settings_set", { key: "supabase_url", value: document.getElementById("set-url").value.trim() });
-      msg.textContent = "URL saved.";
-      msg.style.color = "#3ddc97";
-    } catch (e) {
-      msg.textContent = String(e);
-      msg.style.color = "#ff6b6b";
-    }
-  };
-
-  document.getElementById("set-update").onclick = async () => {
-    const out = document.getElementById("set-update-result");
-    out.textContent = "Checking…";
-    out.style.color = "";
-    try {
-      const r = await invoke("update_check");
-      if (r?.update) {
-        out.innerHTML = `Update available: <strong>v${escapeHtml(String(r.version))}</strong> — ` +
-          `<a href="${escapeHtml(String(r.url))}" target="_blank" rel="noopener" style="color:#4cc9f0">download installer</a>` +
-          (r.notes ? `<br/>${escapeHtml(String(r.notes))}` : "") +
-          `<br/><button id="set-install" class="primary" style="margin-top:8px">Download &amp; install now</button>`;
-        document.getElementById("set-install").onclick = async () => {
-          out.textContent = "Downloading & installing in the background — the terminal stays usable…";
-          try {
-            const v = await invoke("update_install");
-            out.textContent = v === "already latest" ? "Already on the latest version." : `Installed v${v}.`;
-            await renderRestartBanner();
-          } catch (e) {
-            out.textContent = String(e);
-            out.style.color = "#ff6b6b";
-          }
-        };
-      } else {
-        out.textContent = r?.version ? `You're on the latest version (v${r.version}).` : "No releases published yet.";
-      }
-    } catch (e) {
-      out.textContent = String(e);
-      out.style.color = "#ff6b6b";
-    }
-  };
-
+  root.innerHTML = `<h2>Terminal settings</h2><div class="glass panel" style="max-width:680px;margin-top:16px">
+    <h3>Account & subscription</h3><p class="hint">Activation and renewal are managed by your connected owner account. License keys and cloud addresses are handled automatically.</p>
+    <button id="settings-connection">Open account & connection help</button><div id="set-status" class="hint"></div>
+    <h3>Hardware & updates</h3><div class="row"><button id="set-update">Check for updates</button><button id="set-hw">Reconnect controller</button></div>
+    <p id="set-update-result" role="status"></p><p id="set-extra" role="status"></p><div id="set-restart"></div></div>`;
+  document.getElementById("settings-connection").onclick = () => window.__sls_open_connection?.();
   document.getElementById("set-hw").onclick = async () => {
-    const extra = document.getElementById("set-extra");
+    const el = document.getElementById("set-extra");
+    try { el.textContent = String(await invoke("hw_connect", {})); } catch (error) { el.textContent = String(error); }
+  };
+  document.getElementById("set-update").onclick = async () => {
+    const el = document.getElementById("set-update-result");
+    el.textContent = "Checking…";
     try {
-      const res = await invoke("hw_connect", {});
-      extra.textContent = String(res);
-      extra.style.color = "#3ddc97";
-    } catch (e) {
-      extra.textContent = String(e);
-      extra.style.color = "#ff6b6b";
-    }
+      const response = await invoke("update_check");
+      if (!response?.update) { el.textContent = "No newer release available."; return; }
+      el.innerHTML = `Version ${escapeHtml(response.version)} available. <button id="set-install">Install update</button>`;
+      document.getElementById("set-install").onclick = async () => {
+        if (!confirm("Install this update? GymPOS may close during installation.")) return;
+        try { await invoke("update_install"); await renderRestartBanner(); }
+        catch (error) { el.textContent = String(error); }
+      };
+    } catch (error) { el.textContent = String(error); }
   };
 }
 

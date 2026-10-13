@@ -27,9 +27,7 @@ mod inner {
     pub const OUTBOX_DLQ_ATTEMPTS: u32 = 10;
     /// Mirror of the sync fn PRODUCT_IDS_CAP — at the cap the list may be
     /// truncated, so reconcile must be skipped rather than delete real stock.
-    pub const PRODUCT_IDS_LIMIT: u64 = 5000;
     /// Mirror of the sync fn staff limit (100) — same truncated-list guard.
-    pub const STAFF_PULL_LIMIT: usize = 100;
 
     /// Backoff stage from consecutive failures (recycled 1:1 from orig).
     pub fn backoff_secs(consecutive_failures: u32) -> u64 {
@@ -57,17 +55,21 @@ mod inner {
         pub license_token: String,
         pub gym_id: String,
         pub license: Arc<LicenseManager>,
+        pub generation: u64,
     }
 
     impl SyncWorker {
         /// Spawn the background loop on Tauri's async runtime.
-        pub fn start(self) {
+        pub fn start(self) -> tauri::async_runtime::JoinHandle<()> {
             tauri::async_runtime::spawn(async move {
                 let client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(8))
                     .build()
                     .unwrap_or_default();
-                let endpoint = format!("{}/functions/v1/sync", self.supabase_url.trim_end_matches('/'));
+                let endpoint = format!(
+                    "{}/functions/v1/sync",
+                    self.supabase_url.trim_end_matches('/')
+                );
 
                 let mut failures: u32 = 0;
                 let mut idle_ticks: u32 = 0;
@@ -75,8 +77,26 @@ mod inner {
                 loop {
                     tokio::time::sleep(Duration::from_secs(backoff_secs(failures))).await;
 
-                    let has_bearer = db::get_cached_license().ok().flatten().is_some();
-                    let batch = db::take_outbox(100).unwrap_or_default();
+                    let (has_bearer, batch, face_cursor) = {
+                        let _context = crate::terminal_context().read();
+                        if self.generation != crate::sync_generation() {
+                            return;
+                        }
+                        if db::get_setting("gym_id").ok().flatten().as_deref() != Some(&self.gym_id)
+                        {
+                            return;
+                        }
+                        let active = db::get_cached_license().ok().flatten().as_deref()
+                            == Some(&self.license_token);
+                        if !active {
+                            return;
+                        }
+                        (
+                            active,
+                            db::take_outbox(100).unwrap_or_default(),
+                            db::get_setting("face_sync_cursor").ok().flatten(),
+                        )
+                    };
                     let is_idle = batch.is_empty();
 
                     if is_idle {
@@ -91,6 +111,7 @@ mod inner {
                     }
 
                     let payload = serde_json::json!({
+                        "face_since": face_cursor,
                         "attendance": batch.iter().filter(|b| b.op == "attendance").map(|b| {
                             serde_json::from_str::<serde_json::Value>(&b.payload).unwrap_or_default()
                         }).collect::<Vec<_>>(),
@@ -113,8 +134,14 @@ mod inner {
                         Ok(r) => {
                             let status = r.status().as_u16();
                             let body = r.json::<serde_json::Value>().await.unwrap_or_default();
-                            let remote_disabled =
-                                body.get("remote_disabled").and_then(|d| d.as_bool()).unwrap_or(false);
+                            let _context = crate::terminal_context().read();
+                            if self.generation != crate::sync_generation() {
+                                return;
+                            }
+                            let remote_disabled = body
+                                .get("remote_disabled")
+                                .and_then(|d| d.as_bool())
+                                .unwrap_or(false);
 
                             if should_revoke(status, remote_disabled) {
                                 // Kill-switch e2e landed: lock terminal and STOP —
@@ -125,19 +152,50 @@ mod inner {
                             }
 
                             if status >= 200 && status < 300 {
+                                if !valid_sync_response(&body) {
+                                    failures = failures.saturating_add(1);
+                                    continue;
+                                }
+                                if (chrono::Utc::now().timestamp_millis()
+                                    - body["server_time"].as_i64().unwrap_or(0))
+                                .abs()
+                                    > 120_000
+                                {
+                                    failures = failures.saturating_add(1);
+                                    continue;
+                                }
                                 failures = 0;
                                 let _ = db::heartbeat_ok();
-                                let batch_ids: HashSet<&str> = batch.iter().map(|b| b.id.as_str()).collect();
-                                let accepted: Vec<String> = body.get("accepted_ids")
+                                let batch_ids: HashSet<&str> =
+                                    batch.iter().map(|b| b.id.as_str()).collect();
+                                let accepted: Vec<String> = body
+                                    .get("accepted_ids")
                                     .and_then(|v| v.as_array())
-                                    .map(|v| v.iter().filter_map(|id| id.as_str())
-                                        .filter(|id| batch_ids.contains(*id)).map(str::to_string).collect())
+                                    .map(|v| {
+                                        v.iter()
+                                            .filter_map(|id| id.as_str())
+                                            .filter(|id| batch_ids.contains(*id))
+                                            .map(str::to_string)
+                                            .collect()
+                                    })
                                     .unwrap_or_default();
                                 let _ = db::clear_outbox(&accepted);
-                                let accepted_set: HashSet<&str> = accepted.iter().map(String::as_str).collect();
-                                let pending: Vec<String> = batch.iter()
-                                    .filter(|b| !accepted_set.contains(b.id.as_str()))
-                                    .map(|b| b.id.clone()).collect();
+                                let accepted_set: HashSet<&str> =
+                                    accepted.iter().map(String::as_str).collect();
+                                let failed: HashSet<&str> = body["failed_ids"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|v| v.as_str())
+                                    .collect();
+                                let pending: Vec<String> = batch
+                                    .iter()
+                                    .filter(|b| {
+                                        !accepted_set.contains(b.id.as_str())
+                                            && failed.contains(b.id.as_str())
+                                    })
+                                    .map(|b| b.id.clone())
+                                    .collect();
                                 if !pending.is_empty() {
                                     failures = failures.saturating_add(1);
                                     let _ = db::bump_outbox_attempts(&pending);
@@ -147,8 +205,13 @@ mod inner {
                                 // Remote stock is only authoritative once every
                                 // completed local sale has been acknowledged.
                                 // Otherwise a pull could restore sold units.
-                                let catalog_safe = db::unsynced_sales_count().map(|n| n == 0).unwrap_or(false);
-                                if let Some(products) = body.get("products").and_then(|p| p.as_array()).filter(|_| catalog_safe) {
+                                let catalog_safe =
+                                    db::unsynced_sales_count().map(|n| n == 0).unwrap_or(false);
+                                if let Some(products) = body
+                                    .get("products")
+                                    .and_then(|p| p.as_array())
+                                    .filter(|_| catalog_safe)
+                                {
                                     for p in products {
                                         let _ = db::upsert_product(
                                             p["id"].as_str().unwrap_or_default(),
@@ -158,14 +221,18 @@ mod inner {
                                         );
                                     }
                                 }
-                                if let Some(id_list) = body.get("product_ids").and_then(|p| p.as_array()).filter(|_| catalog_safe) {
+                                if let Some(id_list) = body
+                                    .get("product_ids")
+                                    .and_then(|p| p.as_array())
+                                    .filter(|_| catalog_safe)
+                                {
                                     let present: HashSet<String> = id_list
                                         .iter()
                                         .filter_map(|v| v.as_str().map(str::to_string))
                                         .collect();
                                     // Cap hit = list possibly truncated → skip
                                     // reconcile rather than wrongly deleting stock.
-                                    if (present.len() as u64) < PRODUCT_IDS_LIMIT {
+                                    if body["catalog_complete"] == true {
                                         let keep: Vec<String> = present.into_iter().collect();
                                         let _ = db::reconcile_products(&keep);
                                     }
@@ -177,15 +244,26 @@ mod inner {
                                         let o = r.as_object();
                                         let (Some(id), Some(username), Some(pin_hash)) = (
                                             o.and_then(|x| x.get("id")).and_then(|v| v.as_str()),
-                                            o.and_then(|x| x.get("username")).and_then(|v| v.as_str()),
-                                            o.and_then(|x| x.get("pin_hash")).and_then(|v| v.as_str()),
-                                        ) else { continue };
-                                        let role = o.and_then(|x| x.get("role")).and_then(|v| v.as_str()).unwrap_or("staff");
-                                        let active = o.and_then(|x| x.get("active")).and_then(|v| v.as_bool()).unwrap_or(true);
-                                        let _ = db::upsert_staff(id, username, pin_hash, role, active);
+                                            o.and_then(|x| x.get("username"))
+                                                .and_then(|v| v.as_str()),
+                                            o.and_then(|x| x.get("pin_hash"))
+                                                .and_then(|v| v.as_str()),
+                                        ) else {
+                                            continue;
+                                        };
+                                        let role = o
+                                            .and_then(|x| x.get("role"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("staff");
+                                        let active = o
+                                            .and_then(|x| x.get("active"))
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(true);
+                                        let _ =
+                                            db::upsert_staff(id, username, pin_hash, role, active);
                                         present.push(id.to_string());
                                     }
-                                    if present.len() < STAFF_PULL_LIMIT {
+                                    if body["catalog_complete"] == true {
                                         let _ = db::reconcile_staff(&present);
                                     }
                                 }
@@ -196,9 +274,15 @@ mod inner {
                                         let o = r.as_object();
                                         let (Some(code), Some(pct_off)) = (
                                             o.and_then(|x| x.get("code")).and_then(|v| v.as_str()),
-                                            o.and_then(|x| x.get("pct_off")).and_then(|v| v.as_f64()),
-                                        ) else { continue };
-                                        let active = o.and_then(|x| x.get("active")).and_then(|v| v.as_bool()).unwrap_or(true);
+                                            o.and_then(|x| x.get("pct_off"))
+                                                .and_then(|v| v.as_f64()),
+                                        ) else {
+                                            continue;
+                                        };
+                                        let active = o
+                                            .and_then(|x| x.get("active"))
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(true);
                                         let _ = db::upsert_promo(code, pct_off, active);
                                         if active {
                                             present.push(code.to_string());
@@ -206,37 +290,69 @@ mod inner {
                                     }
                                     let _ = db::reconcile_promos(&present);
                                 }
-                                // Member lifecycle pull (status + expires_at).
-                                if let Some(rows) = body.get("members").and_then(|m| m.as_array()) {
-                                    for r in rows {
-                                        let o = r.as_object();
-                                        let Some(id) = o.and_then(|x| x.get("id")).and_then(|v| v.as_str()) else { continue };
-                                        let full_name = o.and_then(|x| x.get("full_name")).and_then(|v| v.as_str()).unwrap_or("Unknown");
-                                        let status = o.and_then(|x| x.get("status")).and_then(|v| v.as_str()).unwrap_or("active");
-                                        let expires_at = o.and_then(|x| x.get("expires_at")).and_then(|v| v.as_str());
-                                        let _ = db::upsert_member_cloud(id, full_name, status, expires_at);
-                                    }
+                                if db::apply_member_snapshot(
+                                    body["members"].as_array().unwrap(),
+                                    body["face_changes"].as_array().unwrap(),
+                                    body["plans"].as_array().unwrap(),
+                                    body["face_cursor"].as_str().unwrap(),
+                                )
+                                .is_ok()
+                                {
+                                    crate::reload_faces();
+                                } else {
+                                    failures = failures.saturating_add(1);
                                 }
                             } else {
                                 failures = failures.saturating_add(1);
-                                let ids: Vec<String> = batch.iter().map(|b| b.id.clone()).collect();
-                                let _ = db::bump_outbox_attempts(&ids);
                             }
                         }
                         Err(_) => {
+                            let _context = crate::terminal_context().read();
+                            if self.generation != crate::sync_generation() {
+                                return;
+                            }
                             failures = failures.saturating_add(1);
-                            let ids: Vec<String> = batch.iter().map(|b| b.id.clone()).collect();
-                            let _ = db::bump_outbox_attempts(&ids);
                         }
                     }
                 }
-            });
+            })
         }
+    }
+
+    pub fn valid_sync_response(body: &serde_json::Value) -> bool {
+        body["remote_disabled"] == false
+            && body["catalog_complete"] == true
+            && body["face_cursor"].as_str().is_some()
+            && body["server_time"].as_i64().is_some()
+            && [
+                "accepted_ids",
+                "products",
+                "product_ids",
+                "staff",
+                "members",
+                "promos",
+                "plans",
+                "face_changes",
+                "failed_ids",
+            ]
+            .iter()
+            .all(|key| body[*key].is_array())
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn malformed_success_does_not_verify_terminal() {
+            assert!(!valid_sync_response(&serde_json::json!({})));
+            assert!(!valid_sync_response(
+                &serde_json::json!({ "remote_disabled": false })
+            ));
+            let complete = serde_json::json!({ "remote_disabled": false, "server_time": 123,"catalog_complete":true,"face_cursor":"2026-10-13T00:00:00Z",
+                "accepted_ids": [], "products": [], "product_ids": [], "members": [], "staff": [], "promos": [],"plans":[],"face_changes":[],"failed_ids":[] });
+            assert!(valid_sync_response(&complete));
+        }
 
         #[test]
         fn backoff_stages() {

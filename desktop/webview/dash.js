@@ -36,36 +36,35 @@ export async function initDash() {
 }
 
 async function refresh() {
+  if (!window.__sls_operable || document.getElementById("view-dash")?.hidden) return;
   const stats = document.getElementById("dash-stats");
   const salesEl = document.getElementById("dash-sales");
   if (!stats) return;
 
   try {
-    let status, pending, sales;
+    let status, pending, sales, summary, account;
     if (invoke) {
-      [status, pending, sales] = await Promise.all([
+      [status, pending, sales,summary,account] = await Promise.all([
         invoke("license_status"),
         invoke("sync_pending"),
         invoke("sale_list", { limit: 20 }),
+        invoke("sales_summary"),invoke("account_status"),
       ]);
     } else {
-      status = { type: "valid", gym_name: "SLS Flagship Facility" };
-      pending = 0;
-      sales = PREVIEW_SALES;
+      throw new Error("Open GymPOS desktop; a browser preview is not an operational terminal.");
     }
 
     const type = String(status?.type ?? "unknown").toLowerCase();
     const tone = type === "valid" ? "badge-ultra" : type === "graceperiod" ? "warn" : "bad";
-    let label = type === "valid" ? "S · ULTRA (ACTIVE)" : type === "graceperiod" ? "GRACE PERIOD" : type.toUpperCase();
+    let label = type === "valid" ? `${status.tier?.toUpperCase() || "ACTIVE"}` : type === "graceperiod" ? "GRACE PERIOD" : type.toUpperCase();
     if (type === "valid" && status?.days_remaining !== undefined) {
-      label = `S · ULTRA (${status.days_remaining}d remaining)`;
+      label = `${status.tier?.toUpperCase() || "ACTIVE"} (${status.days_remaining}d remaining)`;
     } else if (type === "graceperiod" && status?.grace_days_remaining !== undefined) {
       label = `⚠️ GRACE PERIOD (${status.grace_days_remaining}d left)`;
     } else if (type === "expired") {
       label = "❌ EXPIRED (LOCKED)";
     }
-    const today = (sales ?? []).filter((s) => s.created_at?.startsWith("Today") || s.created_at?.startsWith(new Date().toISOString().slice(0, 10)));
-    const todayTotal = today.reduce((a, s) => a + s.total_cents, 0);
+    const todayTotal=summary.total_cents;
 
     stats.innerHTML =
       `<div class="card" style="display:flex;flex-direction:column;gap:6px">` +
@@ -76,12 +75,12 @@ async function refresh() {
       `<div class="card" style="display:flex;flex-direction:column;gap:6px">` +
       `<span class="hint" style="text-transform:uppercase;letter-spacing:1px;font-size:11px">Outbox Sync Queue</span>` +
       `<div style="font-family:Rajdhani,sans-serif;font-size:1.6rem;font-weight:700;color:var(--cyan)">${pending} <span style="font-size:0.9rem;font-weight:400;color:var(--muted)">pending</span></div>` +
-      `<span class="hint" style="font-size:11px">Auto-sync supervisor running</span>` +
+      `<span class="hint" style="font-size:11px">${account.online ? "Account verified online" : "Offline / verification pending"}</span>` +
       `</div>` +
       `<div class="card" style="display:flex;flex-direction:column;gap:6px">` +
       `<span class="hint" style="text-transform:uppercase;letter-spacing:1px;font-size:11px">Sales Register Today</span>` +
       `<div style="font-family:Rajdhani,sans-serif;font-size:1.6rem;font-weight:700;color:#34d399">${cents(todayTotal)}</div>` +
-      `<span class="hint" style="font-size:11px">${today.length} completed transactions</span>` +
+      `<span class="hint" style="font-size:11px">${summary.transactions} local sales · Asia/Manila · all rows, not just recent 20</span>` +
       `</div>`;
 
     salesEl.innerHTML = (sales ?? []).length
@@ -93,7 +92,7 @@ async function refresh() {
               `<td class="hint">${esc(s.created_at)}</td>` +
               `<td><span class="badge" style="background:rgba(139,92,246,0.15);border-color:rgba(139,92,246,0.4);color:#d8b4fe">${esc(s.pay_method)}</span></td>` +
               `<td style="font-family:Rajdhani,sans-serif;font-size:1.1rem;font-weight:700;color:var(--cyan)">${cents(s.total_cents)}</td>` +
-              `<td><span class="badge good">Settled</span></td>` +
+              `<td><span class="badge ${s.pending ? "warn" : "good"}">${s.pending ? "Pending upload" : "Uploaded"}</span></td>` +
               `</tr>`,
           )
           .join("") +

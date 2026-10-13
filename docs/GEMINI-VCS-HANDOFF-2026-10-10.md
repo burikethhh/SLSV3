@@ -1,5 +1,7 @@
 # Gemini handoff — version control and release coordination
 
+Current update (2026-10-13): read [Account-first implementation and release handoff](ACCOUNT-FIRST-IMPLEMENTATION-2026-10-13.md) first. Below is historical October 10 guidance. Approval/payment are separate; migrations 0013–0016 and matching functions/dashboard are deployed. The owner authorized Codex to finish rollout and commit/push reviewed SLS changes. Live legacy recovery remains explicit and backed up. Preserve unrelated firmware/scratch work.
+
 Date: 2026-10-10. Repo: `B:\Projects\SoloLeveling` (`master`, `origin` is `burikethhh/SLSV3`).
 
 ## Your role and authority
