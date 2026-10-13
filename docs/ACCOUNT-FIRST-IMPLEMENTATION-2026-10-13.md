@@ -122,7 +122,15 @@ UI artifacts: `C:/Users/ketha/AppData/Local/Temp/sls-account-ui-1791880765885`; 
 
 Account-first source commit `4c3ca1f1a180a68f5ebb62f6e6ffee5c613c47d6` was pushed atomically to origin/master and origin/main (both started at the same baseline). Immutable GitHub 3.0.4 release was published, its downloaded installer hash and feed signature matched, and current-version requests returned HTTP 204. A final audit then found byte-overflow risk in bulk pending enrollment, so `node scripts/release-control.mjs hold` set only 3.0.4 rollout to 0%; public updater requests correctly returned 204.
 
-Version 3.0.5 is built with the byte-bounded fix and 30 passing native tests; offline RSA interoperability and all 15 UI tests passed again. Installer signature and tamper rejection passed again. Its immutable publication/feed verification will be recorded after the patch source commit.
+Version 3.0.5 is built with the byte-bounded fix and 30 passing native tests; offline RSA interoperability and all 15 UI tests passed again. Installer signature and tamper rejection passed again.
+
+- Patch source commit `4be75dc3074901983d98fcaaabc8b5d2ddfd53b2` was pushed atomically to origin/master and origin/main. `git ls-remote origin refs/tags/v3.0.5` resolves to that exact commit.
+- `gh release create v3.0.5 <installer> <signature> --repo burikethhh/SLSV3 --target 4be75dc3074901983d98fcaaabc8b5d2ddfd53b2 --draft` uploaded the two verified artifacts. Both GitHub asset digests/lengths match local evidence. `gh release edit v3.0.5 --repo burikethhh/SLSV3 --draft=false --latest` published them without changing 3.0.4 assets.
+- [Published 3.0.5 release](https://github.com/burikethhh/SLSV3/releases/tag/v3.0.5) · [installer](https://github.com/burikethhh/SLSV3/releases/download/v3.0.5/SLS.v3_3.0.5_x64-setup.exe).
+- With `SLS_PUBLISH_RELEASE=3.0.5`, `node scripts/release-control.mjs feed` downloaded and SHA256-verified the public installer before inserting its stable release row (rollout 100%, matching minisign). 3.0.4's rollout remains 0%.
+- Public `updates-check?format=tauri&current=3.0.3&channel=stable` and `current=3.0.4` returned HTTP 200 with exact 3.0.5 version, download URL and local verified signature. `current=3.0.5` returned HTTP 204.
+- Both SLS dashboard aliases returned HTTP 200 with the matching `index-C7cfat_J.js` production bundle. Supabase migration list matches through 0016. Unrelated firmware/scratch changes remain uncommitted and untouched.
+- Historical live-test implementations remain recoverable from Git baseline `a6e7aad`; their current stubs cannot reset passwords or mutate billing. Test servers are stopped after validation.
 
 - 3.0.5 installer: 25,171,241 bytes; SHA256 `911F9FBDED637734823C181759A1FABA16DFC4D9D612E2B750A1ECE6B828F1FF`.
 - 3.0.5 updater-signature file SHA256: `64069A8B58A505F5DE7ABB9207BED44DB69E82751AA10871EE9874468FF3F1F1`.
